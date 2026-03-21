@@ -1,0 +1,86 @@
+<form action="<%= admin_records_path %>" method="get" class="toolbar">
+  <input type="text" name="q" value="<%= params[:q] %>" placeholder="Search records (BM25)...">
+  <select name="project" onchange="this.form.submit()">
+    <option value="">All projects</option>
+    <% @projects.each do |p| %>
+      <option value="<%= p %>" <%= 'selected' if params[:project] == p %>><%= p %></option>
+    <% end %>
+  </select>
+  <select name="type" onchange="this.form.submit()">
+    <option value="">All types</option>
+    <% @types.each do |t| %>
+      <option value="<%= t %>" <%= 'selected' if params[:type] == t %>><%= t %></option>
+    <% end %>
+  </select>
+  <select name="classification" onchange="this.form.submit()">
+    <option value="">All classifications</option>
+    <% @classifications.each do |c| %>
+      <option value="<%= c %>" <%= 'selected' if params[:classification] == c %>><%= c %></option>
+    <% end %>
+  </select>
+  <button type="submit" class="btn">Search</button>
+  <% if params[:q].present? || params[:project].present? || params[:type].present? || params[:classification].present? %>
+    <a href="<%= admin_records_path %>" class="btn">Clear</a>
+  <% end %>
+  <span style="color: var(--text-muted); font-size: 13px; margin-left: auto;"><%= @total %> records</span>
+</form>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>Shortlink</th>
+        <th>Project</th>
+        <th>Type</th>
+        <th>Classification</th>
+        <th>Title</th>
+        <th>Tags</th>
+        <th>Updated</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @records.each do |r| %>
+        <tr>
+          <td><a href="<%= admin_record_path(r.shortlink) %>"><code><%= r.shortlink %></code></a></td>
+          <td><a href="<%= admin_records_path(project: r.project) %>"><%= r.project %></a></td>
+          <td><span class="badge badge-<%= r.knowledge_type %>"><%= r.knowledge_type %></span></td>
+          <td><span class="badge badge-<%= r.classification %>"><%= r.classification %></span></td>
+          <td class="truncate"><%= r.title %></td>
+          <td>
+            <% (r.tags || []).first(3).each do |tag| %>
+              <span class="tag"><%= tag %></span>
+            <% end %>
+            <% if (r.tags || []).size > 3 %>
+              <span class="tag">+<%= r.tags.size - 3 %></span>
+            <% end %>
+          </td>
+          <td style="color: var(--text-muted); white-space: nowrap;"><%= r.updated_at.strftime("%b %d, %H:%M") %></td>
+        </tr>
+      <% end %>
+      <% if @records.empty? %>
+        <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 40px;">No records found</td></tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>
+
+<% total_pages = (@total.to_f / @per).ceil %>
+<% if total_pages > 1 %>
+  <div class="pagination">
+    <% if @page > 1 %>
+      <a href="<%= admin_records_path(request.query_parameters.merge(page: @page - 1)) %>" class="btn">&laquo; Prev</a>
+    <% end %>
+    <% (1..total_pages).each do |p| %>
+      <% if p == @page %>
+        <span><%= p %></span>
+      <% elsif (p - @page).abs <= 2 || p == 1 || p == total_pages %>
+        <a href="<%= admin_records_path(request.query_parameters.merge(page: p)) %>" class="btn"><%= p %></a>
+      <% elsif (p - @page).abs == 3 %>
+        <span style="color: var(--text-muted);">&hellip;</span>
+      <% end %>
+    <% end %>
+    <% if @page < total_pages %>
+      <a href="<%= admin_records_path(request.query_parameters.merge(page: @page + 1)) %>" class="btn">Next &raquo;</a>
+    <% end %>
+  </div>
+<% end %>

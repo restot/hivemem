@@ -5,7 +5,7 @@
 # Commands:
 #   setup              Bootstrap the hivemem server (TLS, auth, MCP config)
 #   onboard [PATH]     Onboard a project (inject CLAUDE.md, install skills)
-#   install            Install/update hivemem skills to ~/.claude/skills/
+#   init               Install/update hivemem skills and configure MCP
 #   migrate [PATH]     Migrate mulch records from a project into hivemem
 #   status             Check hivemem server health
 #   version            Show version and check for updates
@@ -19,7 +19,7 @@ GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
 # Defaults
-CLAUDE_SETTINGS="$HOME/.claude/settings.local.json"
+GLOBAL_MCP_CONFIG="$HOME/.mcp.json"
 SKILLS_DST="$HOME/.claude/skills"
 OLD_COMMANDS_DST="$HOME/.claude/commands"
 MCP_URL="${HIVEMEM_URL:-https://localhost:3000/mcp}"
@@ -45,10 +45,17 @@ resolve_token() {
   fi
   # Try to find .env in known locations
   local env_file=""
-  if [[ -f "$HIVEMEM_PROJECT_ROOT/.env" ]]; then
+  if [[ -n "${HIVEMEM_PROJECT_ROOT:-}" && -f "$HIVEMEM_PROJECT_ROOT/.env" ]]; then
     env_file="$HIVEMEM_PROJECT_ROOT/.env"
   elif [[ -f "$HOME/.hivemem/.env" ]]; then
     env_file="$HOME/.hivemem/.env"
+  else
+    # Auto-detect project root
+    local root
+    root="$(find_project_root 2>/dev/null || true)"
+    if [[ -n "$root" && -f "$root/.env" ]]; then
+      env_file="$root/.env"
+    fi
   fi
   if [[ -n "$env_file" ]]; then
     grep -E '^HIVEMEM_AUTH_TOKEN=' "$env_file" 2>/dev/null | cut -d= -f2- || true
@@ -81,49 +88,48 @@ find_project_root() {
   die "Cannot find hivemem project root. Set HIVEMEM_PROJECT_ROOT or run from the hivemem directory."
 }
 
-# Configure MCP endpoint in Claude Code settings
-# Usage: configure_mcp <token>
+# Configure MCP endpoint in .mcp.json
+# Usage: configure_mcp <token> [--project <path>]
+# Without --project: writes to ~/.mcp.json (global)
+# With --project: writes to <path>/.mcp.json (project-scoped)
 configure_mcp() {
   local token="${1:-}"
+  shift || true
+  local mcp_file="$GLOBAL_MCP_CONFIG"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) mcp_file="$2/.mcp.json"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
   need python3
 
-  mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+  python3 - "$MCP_URL" "$token" "$mcp_file" <<'PYEOF'
+import json, sys
 
-  local mcp_entry
-  if [[ -n "$token" ]]; then
-    mcp_entry=$(python3 -c "
-import json
-print(json.dumps({'type': 'url', 'url': '$MCP_URL', 'headers': {'Authorization': 'Bearer $token'}}))
-")
-  else
-    mcp_entry=$(python3 -c "
-import json
-print(json.dumps({'type': 'url', 'url': '$MCP_URL'}))
-")
-  fi
+mcp_url, token, mcp_file = sys.argv[1], sys.argv[2], sys.argv[3]
 
-  if [[ -f "$CLAUDE_SETTINGS" ]]; then
-    python3 -c "
-import json
-with open('$CLAUDE_SETTINGS', 'r') as f:
-    settings = json.load(f)
-settings.setdefault('mcpServers', {})
-settings['mcpServers']['hivemem'] = json.loads('$mcp_entry')
-with open('$CLAUDE_SETTINGS', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-"
-    ok "Updated $CLAUDE_SETTINGS"
-  else
-    python3 -c "
-import json
-settings = {'mcpServers': {'hivemem': json.loads('$mcp_entry')}}
-with open('$CLAUDE_SETTINGS', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-"
-    ok "Created $CLAUDE_SETTINGS"
-  fi
+entry = {"type": "url", "url": mcp_url}
+if token:
+    entry["headers"] = {"Authorization": f"Bearer {token}"}
+
+try:
+    with open(mcp_file, "r") as f:
+        config = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    config = {}
+
+config.setdefault("mcpServers", {})
+config["mcpServers"]["hivemem"] = entry
+
+with open(mcp_file, "w") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PYEOF
+
+  ok "MCP config -> $mcp_file"
 }
 
 # =========================================================================
@@ -223,7 +229,7 @@ cmd_setup() {
   echo "  MCP endpoint:  $MCP_URL"
   echo "  TLS certs:     $certs_dir/"
   echo "  Auth token:    .env (HIVEMEM_AUTH_TOKEN)"
-  echo "  Claude config: $CLAUDE_SETTINGS"
+  echo "  Claude config: $GLOBAL_MCP_CONFIG"
   echo ""
   echo "  Next steps:"
   echo "    cd $project_root && docker compose up -d"
@@ -236,14 +242,22 @@ cmd_setup() {
 }
 
 # =========================================================================
-# install — Install/update skills to ~/.claude/skills/
+# init — Install/update skills and configure MCP
 # =========================================================================
-cmd_install() {
+cmd_init() {
   need git
 
   local repo="${HIVEMEM_REPO:-$GITHUB_URL.git}"
   local branch="${HIVEMEM_BRANCH:-main}"
   local skills_path="${HIVEMEM_SKILLS_PATH:-skills}"
+
+  local project_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) project_path="$2"; shift 2 ;;
+      *) die "init: unknown option $1" ;;
+    esac
+  done
 
   info "Installing hivemem skills"
   mkdir -p "$SKILLS_DST"
@@ -299,14 +313,31 @@ cmd_install() {
   # --- MCP config ---
   echo ""
   info "MCP config"
-  local token
-  token="$(resolve_token)"
-  if [[ -n "$token" ]]; then
-    configure_mcp "$token"
+
+  local target_mcp
+  if [[ -n "$project_path" ]]; then
+    target_mcp="$project_path/.mcp.json"
   else
-    # No token — configure without auth, warn
-    configure_mcp ""
-    warn "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup'."
+    target_mcp="$GLOBAL_MCP_CONFIG"
+  fi
+
+  # If already configured and no explicit env vars, preserve existing config
+  if [[ -f "$target_mcp" ]] && grep -q '"hivemem"' "$target_mcp" 2>/dev/null \
+     && [[ -z "${HIVEMEM_URL:-}" ]] && [[ -z "${HIVEMEM_AUTH_TOKEN:-}" ]]; then
+    skip "MCP already configured in $target_mcp"
+  else
+    local token
+    token="$(resolve_token)"
+    if [[ -n "$token" ]]; then
+      if [[ -n "$project_path" ]]; then
+        configure_mcp "$token" --project "$project_path"
+      else
+        configure_mcp "$token"
+      fi
+    else
+      warn "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup'."
+      warn "Skipping MCP config to avoid overwriting existing settings."
+    fi
   fi
 }
 
@@ -317,12 +348,14 @@ cmd_onboard() {
   local target_root="${1:-.}"
   local no_install=false
   local migrate=false
+  local project_mcp=false
 
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-install) no_install=true; shift ;;
       --migrate-mulch) migrate=true; shift ;;
+      --project-mcp) project_mcp=true; shift ;;
       *) die "onboard: unknown option $1" ;;
     esac
   done
@@ -333,9 +366,13 @@ cmd_onboard() {
 
   info "Onboarding project: $proj_name ($target_root)"
 
-  # --- Skills ---
+  # --- Skills + MCP ---
   if ! $no_install; then
-    cmd_install
+    if $project_mcp; then
+      cmd_init --project "$target_root"
+    else
+      cmd_init
+    fi
     echo ""
   fi
 
@@ -594,9 +631,16 @@ cmd_status() {
   printf "  Skills:  %d installed in %s\n" "$skill_count" "$SKILLS_DST"
 
   # Check MCP config
-  if [[ -f "$CLAUDE_SETTINGS" ]] && grep -q '"hivemem"' "$CLAUDE_SETTINGS" 2>/dev/null; then
-    ok "MCP configured in $CLAUDE_SETTINGS"
-  else
+  local mcp_found=false
+  if [[ -f "$GLOBAL_MCP_CONFIG" ]] && grep -q '"hivemem"' "$GLOBAL_MCP_CONFIG" 2>/dev/null; then
+    ok "MCP configured globally ($GLOBAL_MCP_CONFIG)"
+    mcp_found=true
+  fi
+  if [[ -f ".mcp.json" ]] && grep -q '"hivemem"' ".mcp.json" 2>/dev/null; then
+    ok "MCP configured in project (.mcp.json)"
+    mcp_found=true
+  fi
+  if ! $mcp_found; then
     warn "MCP not configured (run 'hivemem setup')"
   fi
 }
@@ -607,13 +651,13 @@ cmd_status() {
 cmd_version() {
   echo "hivemem v$VERSION"
 
+  need gh
+
   local latest
-  latest="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-    "$GITHUB_URL/releases/latest" 2>/dev/null \
-    | grep -oE '[^/]+$' || true)"
+  latest="$(gh release view --repo "$GITHUB_REPO" --json tagName -q .tagName 2>/dev/null || true)"
 
   if [[ -z "$latest" ]]; then
-    echo "  (could not check for updates)"
+    echo "  (no releases published yet)"
   elif [[ "$latest" == "v$VERSION" ]]; then
     echo "  (up to date)"
   else
@@ -622,18 +666,18 @@ cmd_version() {
 }
 
 # =========================================================================
-# update — Self-update from GitHub releases
+# update — Self-update from GitHub releases (uses gh for private repos)
 # =========================================================================
 cmd_update() {
+  need gh
+
   local self
   self="$(command -v hivemem 2>/dev/null || echo "$0")"
 
   local latest
-  latest="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-    "$GITHUB_URL/releases/latest" 2>/dev/null \
-    | grep -oE '[^/]+$' || true)"
+  latest="$(gh release view --repo "$GITHUB_REPO" --json tagName -q .tagName 2>/dev/null || true)"
 
-  [[ -z "$latest" ]] && die "Could not check for updates"
+  [[ -z "$latest" ]] && die "No releases found. Publish one first: gh release create v$VERSION bin/hivemem --repo $GITHUB_REPO"
 
   if [[ "$latest" == "v$VERSION" ]]; then
     echo "Already up to date (v$VERSION)"
@@ -641,13 +685,17 @@ cmd_update() {
   fi
 
   echo "Updating: v$VERSION -> $latest"
-  local tmpfile
-  tmpfile="$(mktemp)" || die "Could not create temp file"
-  curl -fsSL "$GITHUB_URL/releases/latest/download/hivemem" \
-    -o "$tmpfile" || { rm -f "$tmpfile"; die "Download failed"; }
-  chmod +x "$tmpfile"
-  mv -f "$tmpfile" "$self"
-  echo "Done."
+  local tmpdir
+  tmpdir="$(mktemp -d)" || die "Could not create temp dir"
+
+  gh release download "$latest" --repo "$GITHUB_REPO" \
+    --pattern "hivemem" --dir "$tmpdir" \
+    || { rm -rf "$tmpdir"; die "Download failed"; }
+
+  chmod +x "$tmpdir/hivemem"
+  mv -f "$tmpdir/hivemem" "$self"
+  rm -rf "$tmpdir"
+  echo "Updated to $latest"
 }
 
 # =========================================================================
@@ -664,7 +712,8 @@ Commands:
   onboard [PATH] [OPTIONS]        Onboard a project
     --no-install                    Skip skill installation
     --migrate-mulch                 Also migrate mulch records
-  install                         Install/update skills to ~/.claude/skills/
+    --project-mcp                   Write .mcp.json in project instead of global
+  init [--project PATH]           Install skills and configure MCP
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   status                          Check server health and config
   version                         Show version, check for updates
@@ -680,8 +729,8 @@ Environment:
   HIVEMEM_SKILLS_PATH      Path within repo (default: skills)
 
 Install:
-  curl -fsSL https://github.com/restot/hivemem/releases/latest/download/hivemem \
-    -o ~/.claude/bin/hivemem && chmod +x ~/.claude/bin/hivemem
+  gh release download --repo restot/hivemem --pattern hivemem --dir ~/.claude/bin \
+    && chmod +x ~/.claude/bin/hivemem
 
 Onboard a new project:
   cd ~/my-project
@@ -699,7 +748,7 @@ shift || true
 case "$cmd" in
   setup)    cmd_setup "$@" ;;
   onboard)  cmd_onboard "$@" ;;
-  install)  cmd_install "$@" ;;
+  init)     cmd_init "$@" ;;
   migrate)  cmd_migrate "$@" ;;
   status)   cmd_status "$@" ;;
   version)  cmd_version "$@" ;;

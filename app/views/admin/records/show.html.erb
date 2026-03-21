@@ -1,0 +1,102 @@
+<div style="margin-bottom: 16px;">
+  <a href="<%= admin_records_path(project: @record.project) %>">&larr; <%= @record.project %></a>
+</div>
+
+<div class="detail-header">
+  <h1><%= @record.title %></h1>
+  <div class="detail-meta">
+    <code><%= @record.shortlink %></code>
+    <span class="badge badge-<%= @record.knowledge_type %>"><%= @record.knowledge_type %></span>
+    <span class="badge badge-<%= @record.classification %>"><%= @record.classification %></span>
+    <span>in <a href="<%= admin_records_path(project: @record.project) %>"><%= @record.project %></a></span>
+    <span>created <%= @record.created_at.strftime("%Y-%m-%d %H:%M") %></span>
+    <span>updated <%= @record.updated_at.strftime("%Y-%m-%d %H:%M") %></span>
+  </div>
+</div>
+
+<div class="grid grid-3" style="grid-template-columns: 1fr 300px; margin-bottom: 24px;">
+  <div>
+    <% if @record.summary.present? %>
+      <div class="card" style="margin-bottom: 16px;">
+        <h3>Summary</h3>
+        <p style="font-size: 14px; color: var(--text);"><%= @record.summary %></p>
+      </div>
+    <% end %>
+
+    <div class="card">
+      <h3>Content</h3>
+      <div class="detail-content"><%= @record.content %></div>
+    </div>
+
+    <% if @record.metadata.present? && @record.metadata.any? %>
+      <div class="card" style="margin-top: 16px;">
+        <h3>Metadata</h3>
+        <div class="detail-content"><%= JSON.pretty_generate(@record.metadata) %></div>
+      </div>
+    <% end %>
+
+    <% if @record.outcomes.present? && @record.outcomes.any? %>
+      <div class="card" style="margin-top: 16px;">
+        <h3>Outcomes</h3>
+        <% @record.outcomes.each do |outcome| %>
+          <div style="padding: 8px 0; border-bottom: 1px solid var(--border);">
+            <div style="font-size: 13px;"><%= outcome["description"] || outcome.inspect %></div>
+            <% if outcome["recorded_at"] %>
+              <div style="font-size: 11px; color: var(--text-muted);"><%= outcome["recorded_at"] %></div>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="card detail-sidebar">
+    <% if @record.tags.present? && @record.tags.any? %>
+      <dt>Tags</dt>
+      <dd>
+        <% @record.tags.each do |tag| %>
+          <span class="tag"><%= tag %></span>
+        <% end %>
+      </dd>
+    <% end %>
+
+    <% if @record.created_by.present? %>
+      <dt>Created By</dt>
+      <dd><%= @record.created_by %></dd>
+    <% end %>
+
+    <% if @record.evidence.present? && @record.evidence.any? %>
+      <dt>Evidence</dt>
+      <dd style="font-size: 12px;">
+        <% @record.evidence.each do |k, v| %>
+          <div><strong><%= k %>:</strong> <%= v %></div>
+        <% end %>
+      </dd>
+    <% end %>
+
+    <% if @record.relates_to.present? && @record.relates_to.any? %>
+      <dt>Relates To</dt>
+      <dd>
+        <% @record.relates_to.each do |sl| %>
+          <div><a href="<%= admin_record_path(sl) %>"><code><%= sl %></code></a></div>
+        <% end %>
+      </dd>
+    <% end %>
+
+    <% if @record.supersedes.present? && @record.supersedes.any? %>
+      <dt>Supersedes</dt>
+      <dd>
+        <% @record.supersedes.each do |sl| %>
+          <div><a href="<%= admin_record_path(sl) %>"><code><%= sl %></code></a></div>
+        <% end %>
+      </dd>
+    <% end %>
+
+    <dt>ID</dt>
+    <dd style="font-size: 11px; color: var(--text-muted); word-break: break-all;"><%= @record.id %></dd>
+
+    <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
+      <%= button_to "Delete Record", admin_record_path(@record.shortlink), method: :delete, class: "btn btn-danger", data: { turbo_confirm: "Delete #{@record.shortlink}?" } %>
+    </div>
+  </div>
+</div>

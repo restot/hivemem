@@ -1,0 +1,86 @@
+<div class="grid grid-4" style="margin-bottom: 24px;">
+  <div class="card">
+    <h3>Total Records</h3>
+    <div class="stat"><%= @total_records %></div>
+  </div>
+  <div class="card">
+    <h3>Projects</h3>
+    <div class="stat"><%= @by_project.size %></div>
+  </div>
+  <div class="card">
+    <h3>Database</h3>
+    <div class="stat" style="font-size: 24px;"><%= @db_size %></div>
+  </div>
+  <div class="card">
+    <h3>Uptime</h3>
+    <div class="stat" style="font-size: 24px; color: var(--green);">OK</div>
+  </div>
+</div>
+
+<div class="grid grid-2" style="margin-bottom: 24px;">
+  <div class="card">
+    <h3>Records by Project</h3>
+    <% max = @by_project.map(&:last).max || 1 %>
+    <% @by_project.each do |project, count| %>
+      <div class="bar-row">
+        <div class="bar-label"><a href="<%= admin_records_path(project: project) %>"><%= project %></a></div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: <%= (count.to_f / max * 100).round(1) %>%"></div>
+        </div>
+        <div class="bar-count"><%= count %></div>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="card">
+    <h3>By Type</h3>
+    <% type_max = @by_type.values.max || 1 %>
+    <% @by_type.sort_by { |_, v| -v }.each do |type, count| %>
+      <div class="bar-row">
+        <div class="bar-label"><span class="badge badge-<%= type %>"><%= type %></span></div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: <%= (count.to_f / type_max * 100).round(1) %>%; background: var(--purple);"></div>
+        </div>
+        <div class="bar-count"><%= count %></div>
+      </div>
+    <% end %>
+
+    <h3 style="margin-top: 24px;">By Classification</h3>
+    <% cls_max = @by_classification.values.max || 1 %>
+    <% @by_classification.sort_by { |_, v| -v }.each do |cls, count| %>
+      <div class="bar-row">
+        <div class="bar-label"><span class="badge badge-<%= cls %>"><%= cls %></span></div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: <%= (count.to_f / cls_max * 100).round(1) %>%; background: var(--orange);"></div>
+        </div>
+        <div class="bar-count"><%= count %></div>
+      </div>
+    <% end %>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Recent Records</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Shortlink</th>
+        <th>Project</th>
+        <th>Type</th>
+        <th>Title</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @recent.each do |r| %>
+        <tr>
+          <td><a href="<%= admin_record_path(r.shortlink) %>"><code><%= r.shortlink %></code></a></td>
+          <td><a href="<%= admin_records_path(project: r.project) %>"><%= r.project %></a></td>
+          <td><span class="badge badge-<%= r.knowledge_type %>"><%= r.knowledge_type %></span></td>
+          <td class="truncate"><%= r.title %></td>
+          <td style="color: var(--text-muted); white-space: nowrap;"><%= r.created_at.strftime("%b %d, %H:%M") %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>
