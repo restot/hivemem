@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# Watchtower — lightweight GHCR image update checker & auto-deployer
+#
+# Monitors GHCR for new image digests and restarts affected docker-compose
+# services when updates are detected. Runs on the HOST via cron.
+#
+# Cron entry (add to host crontab):
+# * * * * * /path/to/hivemem/bin/watchtower >> /var/log/hivemem-watchtower.log 2>&1
+
+set -uo pipefail
+
+# Config
+COMPOSE_FILE="docker-compose.prod.yml"
+COMPOSE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOCK_FILE="/tmp/hivemem-watchtower.lock"
+STATE_DIR="${COMPOSE_DIR}/.watchtower"
+DEPLOY_TIMEOUT=120
+
+# Source .env for GH_TOKEN, GH_USER, TELEGRAM_BOT_TOKEN, ADMIN_USER_ID
+set -a
+source "${COMPOSE_DIR}/.env"
+set +a
+
+# Prefer classic PAT (has read:packages) over fine-grained
+GH_TOKEN="${GH_TOKEN_LEGACY:-${GH_TOKEN}}"
+
+# Image-to-service mapping
+declare -A SERVICES=(
+  ["ghcr.io/restot/hivemem"]="web"
+)
+
+# --- Lock file mechanism ---
+exec 200>"$LOCK_FILE"
+flock -n 200 || { echo "$(date -Iseconds) Already running"; exit 0; }
+trap 'rm -f "$LOCK_FILE"' EXIT
+
+send_telegram() {
+  local message="$1"
+  [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ADMIN_USER_ID:-}" ]] && return 0
+  curl -sf --max-time 10 -X POST \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d chat_id="${ADMIN_USER_ID}" \
+    -d text="${message}" \
+    -d parse_mode=Markdown \
+    -d disable_notification=true \
+    > /dev/null 2>&1 || true
+}
+
+# --- Functions ---
+
+get_ghcr_token() {
+  local repo="$1"
+  curl -sf --max-time 10 -u "${GH_USER}:${GH_TOKEN}" \
+    "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token'
+}
+
+get_remote_digest() {
+  local image="$1"
+  local repo="${image#ghcr.io/}"
+  local token
+  token=$(get_ghcr_token "$repo") || return 1
+  [[ -z "$token" || "$token" == "null" ]] && return 1
+  curl -sf --max-time 10 \
+    -H "Authorization: Bearer ${token}" \
+    -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+    "https://ghcr.io/v2/${repo}/manifests/latest" \
+    -o /dev/null -D - | grep -i docker-content-digest | awk '{print $2}' | tr -d '\r'
+}
+
+get_local_digest() {
+  local image="$1"
+  docker image inspect "${image}:latest" --format '{{index .RepoDigests 0}}' 2>/dev/null | cut -d@ -f2
+}
+
+get_image_sha() {
+  local image="$1"
+  docker image inspect "${image}:latest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null
+}
+
+send_notification() {
+  local image="$1"
+  local services="$2"
+  local new_sha
+  new_sha=$(get_image_sha "$image")
+
+  mkdir -p "$STATE_DIR"
+  local state_file="${STATE_DIR}/$(echo "$image" | tr '/' '_').sha"
+  local prev_sha=""
+  [[ -f "$state_file" ]] && prev_sha=$(cat "$state_file")
+
+  local repo_name="${image#ghcr.io/}"
+
+  local message
+  if [[ -n "$prev_sha" && -n "$new_sha" ]]; then
+    message="🚀 Deployed hivemem ${new_sha:0:7} — [diff](https://github.com/${repo_name}/compare/${prev_sha}...${new_sha})"
+  elif [[ -n "$new_sha" ]]; then
+    message="🚀 Deployed hivemem ${new_sha:0:7} — [commit](https://github.com/${repo_name}/commit/${new_sha})"
+  else
+    message="🚀 Deployed hivemem (new image)"
+  fi
+
+  send_telegram "$message"
+  [[ -n "$new_sha" ]] && echo "$new_sha" > "$state_file"
+}
+
+# --- Compose file change detection ---
+
+check_compose_changed() {
+  mkdir -p "$STATE_DIR"
+  local hash_file="${STATE_DIR}/compose.hash"
+  local prev_file="${STATE_DIR}/compose.prev"
+  local compose_path="${COMPOSE_DIR}/${COMPOSE_FILE}"
+  local current_hash
+  current_hash=$(md5sum "$compose_path" 2>/dev/null || md5 -q "$compose_path")
+  current_hash=$(echo "$current_hash" | awk '{print $1}')
+  local prev_hash=""
+  [[ -f "$hash_file" ]] && prev_hash=$(cat "$hash_file")
+
+  if [[ "$current_hash" != "$prev_hash" ]]; then
+    COMPOSE_DIFF=""
+    if [[ -f "$prev_file" ]]; then
+      COMPOSE_DIFF=$(diff -u "$prev_file" "$compose_path" \
+        | tail -n +3 \
+        | grep '^[+-]' \
+        | grep -v '^[+-][+-][+-]' \
+        | head -20)
+    fi
+    echo "$current_hash" > "$hash_file"
+    cp "$compose_path" "$prev_file"
+    [[ -n "$prev_hash" ]] && return 0
+  fi
+  return 1
+}
+
+# --- Health check ---
+
+verify_health() {
+  local retries=6
+  local i
+  for ((i=1; i<=retries; i++)); do
+    local unhealthy
+    unhealthy=$(cd "$COMPOSE_DIR" && docker compose -f "$COMPOSE_FILE" ps --format json 2>/dev/null \
+      | jq -r 'select(.Health == "unhealthy" or .State != "running") | .Service' 2>/dev/null)
+    if [[ -z "$unhealthy" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  local msg="⚠️ Watchtower: unhealthy services after deploy: ${unhealthy//$'\n'/, }"
+  echo "$(date -Iseconds) $msg"
+  send_telegram "$msg"
+  return 1
+}
+
+# --- Main ---
+
+main() {
+  local updated=false
+  local compose_changed=false
+
+  if check_compose_changed; then
+    compose_changed=true
+  fi
+
+  for image in "${!SERVICES[@]}"; do
+    local services="${SERVICES[$image]}"
+    local remote_digest local_digest
+
+    remote_digest=$(get_remote_digest "$image")
+    if [[ -z "$remote_digest" ]]; then
+      echo "$(date -Iseconds) Failed to fetch remote digest for ${image}, skipping"
+      continue
+    fi
+    local_digest=$(get_local_digest "$image") || true
+
+    if [[ "$remote_digest" != "$local_digest" ]]; then
+      echo "$(date -Iseconds) Update detected for ${image}: ${local_digest:-none} → ${remote_digest}"
+      if ! timeout 60 docker pull "${image}:latest"; then
+        echo "$(date -Iseconds) Failed to pull ${image}, skipping"
+        continue
+      fi
+      updated=true
+    fi
+  done
+
+  if $updated || $compose_changed; then
+    if $compose_changed; then
+      echo "$(date -Iseconds) Compose file changed"
+    fi
+    cd "$COMPOSE_DIR"
+    if ! timeout "$DEPLOY_TIMEOUT" docker compose -f "$COMPOSE_FILE" up -d; then
+      local msg="watchtower: docker compose up failed"
+      echo "$(date -Iseconds) $msg"
+      send_telegram "⚠️ $msg"
+      return 1
+    fi
+
+    for image in "${!SERVICES[@]}"; do
+      local services="${SERVICES[$image]}"
+      local local_digest
+      local_digest=$(get_local_digest "$image") || true
+      local state_digest_file="${STATE_DIR}/$(echo "$image" | tr '/' '_').digest"
+      local prev_digest=""
+      [[ -f "$state_digest_file" ]] && prev_digest=$(cat "$state_digest_file")
+      if [[ -n "$local_digest" && "$local_digest" != "$prev_digest" ]]; then
+        send_notification "$image" "$services"
+        echo "$local_digest" > "$state_digest_file"
+      fi
+    done
+
+    if $compose_changed && ! $updated; then
+      local msg="🔧 Hivemem config changed, services recreated"
+      if [[ -n "${COMPOSE_DIFF:-}" ]]; then
+        msg="${msg}
+\`\`\`
+${COMPOSE_DIFF}
+\`\`\`"
+      fi
+      send_telegram "$msg"
+    fi
+
+    verify_health
+  else
+    echo "$(date -Iseconds) No updates"
+  fi
+}
+
+main "$@"

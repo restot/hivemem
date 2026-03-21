@@ -57,6 +57,10 @@ RUN bundle exec bootsnap precompile -j 1 app/ lib/
 # Final stage for app image
 FROM base
 
+# Git revision label for watchtower diff links
+ARG GIT_SHA
+LABEL org.opencontainers.image.revision=$GIT_SHA
+
 # Run and own only the runtime files as a non-root user for security
 RUN groupadd --system --gid 1000 rails && \
     useradd rails --uid 1000 --gid 1000 --create-home --shell /bin/bash

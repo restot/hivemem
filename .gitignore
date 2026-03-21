@@ -18,6 +18,12 @@
 /tmp/pids/*
 !/tmp/pids/.keep
 
+# TLS certs
+/certs/
+
+# Watchtower state
+/.watchtower/
+
 # Ignore storage
 /storage/*
 !/storage/.keep

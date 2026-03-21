@@ -1,0 +1,41 @@
+services:
+  db:
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_USER: ${DB_USER:-hivemem}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-hivemem_production}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hivemem}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/restot/hivemem:latest
+    command: bundle exec puma -C config/puma.rb
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - ./certs:/rails/certs:ro
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-hivemem}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-hivemem_production}
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      HIVEMEM_AUTH_TOKEN: ${HIVEMEM_AUTH_TOKEN}
+      SSL_CERT_FILE: /rails/certs/server.pem
+      SSL_KEY_FILE: /rails/certs/server-key.pem
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

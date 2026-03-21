@@ -1,0 +1,90 @@
+name: Build and push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, '[no-build]')"
+    environment: ci
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify CI started
+        id: tg_start
+        continue-on-error: true
+        env:
+          RAW_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          GIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          COMMIT_MSG=$(echo "$RAW_COMMIT_MSG" | head -1 | cut -c1-60)
+          SHORT_SHA="${GIT_SHA:0:7}"
+          COMMIT_URL="https://github.com/${REPO}/commit/${GIT_SHA}"
+          TEXT="🔨 *Building hivemem*: \`${COMMIT_MSG}\` [\`${SHORT_SHA}\`](${COMMIT_URL})"
+          RESP=$(curl -s -X POST \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT}" \
+            -d text="$TEXT" \
+            -d parse_mode=Markdown \
+            -d disable_web_page_preview=true)
+          MSG_ID=$(echo "$RESP" | jq -r '.result.message_id')
+          echo "msg_id=$MSG_ID" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Notify CI finished
+        if: always()
+        continue-on-error: true
+        env:
+          RAW_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          GIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          JOB_STATUS: ${{ job.status }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_MSG_ID: ${{ steps.tg_start.outputs.msg_id }}
+        run: |
+          COMMIT_MSG=$(echo "$RAW_COMMIT_MSG" | head -1 | cut -c1-60)
+          SHORT_SHA="${GIT_SHA:0:7}"
+          COMMIT_URL="https://github.com/${REPO}/commit/${GIT_SHA}"
+          if [ "$JOB_STATUS" = "success" ]; then
+            TEXT="✅ *Built hivemem*: \`${COMMIT_MSG}\` [\`${SHORT_SHA}\`](${COMMIT_URL})"
+          else
+            TEXT="❌ *Failed hivemem*: \`${COMMIT_MSG}\` [\`${SHORT_SHA}\`](${COMMIT_URL})"
+          fi
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TG_TOKEN}/editMessageText" \
+            -d chat_id="${TG_CHAT}" \
+            -d message_id="${TG_MSG_ID}" \
+            -d text="$TEXT" \
+            -d parse_mode=Markdown \
+            -d disable_web_page_preview=true || true
