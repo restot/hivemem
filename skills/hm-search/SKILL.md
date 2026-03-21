@@ -1,3 +1,8 @@
+---
+name: hm-search
+description: Search the hivemem knowledge store. Use when the user wants to find knowledge records, look up past decisions, search conventions, or says "hm-search" or "search knowledge".
+---
+
 Search the hivemem knowledge store.
 
 Arguments: $ARGUMENTS (search query, optionally with filters)

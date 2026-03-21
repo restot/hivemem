@@ -1,3 +1,8 @@
+---
+name: hm-status
+description: Show hivemem knowledge store statistics. Use when the user wants an overview of stored knowledge, record counts, or says "hm-status" or "knowledge status".
+---
+
 Show hivemem knowledge store statistics.
 
 Steps:

@@ -7,16 +7,18 @@ class HivememSearchTool < MCP::Tool
       project: { type: "string", description: "Filter by project name" },
       knowledge_type: { type: "string", description: "Filter by type: convention, pattern, decision, failure, reference, guide" },
       tags: { type: "array", items: { type: "string" }, description: "Filter by tags (AND logic)" },
+      classification: { type: "string", description: "Filter by classification: foundational, tactical, observational" },
       limit: { type: "integer", description: "Max results (default 20)" },
       offset: { type: "integer", description: "Offset for pagination (default 0)" }
     }
   )
 
   class << self
-    def call(query: nil, project: nil, knowledge_type: nil, tags: nil, limit: 20, offset: 0, server_context: {})
+    def call(query: nil, project: nil, knowledge_type: nil, classification: nil, tags: nil, limit: 20, offset: 0, server_context: {})
       scope = KnowledgeRecord
         .filter_by_project(project)
         .filter_by_knowledge_type(knowledge_type)
+        .filter_by_classification(classification)
         .filter_by_tags(tags)
 
       if query.present?

@@ -1,3 +1,8 @@
+---
+name: hm-prime
+description: Prime the current session with hivemem knowledge. Use when starting a session, needing project context, or when the user says "prime", "load knowledge", or "hm-prime".
+---
+
 Prime the current session with relevant hivemem knowledge.
 
 Arguments: $ARGUMENTS (project name, or "all" for cross-project knowledge)

@@ -1,3 +1,8 @@
+---
+name: hm-read
+description: Read a full hivemem knowledge record by shortlink. Use when the user wants to view a specific record, says "hm-read", or references a shortlink like "hm-abc1234".
+---
+
 Read a full hivemem knowledge record.
 
 Arguments: $ARGUMENTS (shortlink, e.g. hm-abc1234)

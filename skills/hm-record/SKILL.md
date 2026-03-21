@@ -1,3 +1,8 @@
+---
+name: hm-record
+description: Record a knowledge entry in hivemem. Use when the user wants to save a convention, pattern, decision, failure, reference, or guide. Trigger on "record", "save knowledge", "hm-record", or "remember this".
+---
+
 Record a knowledge entry in hivemem.
 
 Arguments: $ARGUMENTS (format: "<domain> <type> <description>" or just a description)
