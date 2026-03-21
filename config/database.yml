@@ -1,0 +1,20 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  host: <%= ENV.fetch("DB_HOST", "localhost") %>
+  port: <%= ENV.fetch("DB_PORT", 5432) %>
+  username: <%= ENV.fetch("DB_USER", "hivemem") %>
+  password: <%= ENV.fetch("DB_PASSWORD", "hivemem_dev") %>
+  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS", 5) %>
+
+development:
+  <<: *default
+  database: <%= ENV.fetch("DB_NAME", "hivemem_development") %>
+
+test:
+  <<: *default
+  database: <%= ENV.fetch("DB_NAME_TEST", "hivemem_test") %>
+
+production:
+  <<: *default
+  database: <%= ENV.fetch("DB_NAME", "hivemem_production") %>
