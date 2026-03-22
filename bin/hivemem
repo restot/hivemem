@@ -8,6 +8,7 @@
 #   init               Install/update hivemem skills and configure MCP
 #   prime [PROJECT] [OPTIONS]  Output project knowledge for session priming
 #   migrate [PATH]     Migrate mulch records from a project into hivemem
+#   validate           Check record health (pre-commit hook)
 #   status             Check hivemem server health
 #   version            Show version and check for updates
 #   update             Self-update to the latest release
@@ -15,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.1"
+VERSION="0.3.0"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
@@ -763,7 +764,7 @@ print(json.dumps(payload))
 # prime — Output project knowledge for session priming (used by hooks)
 # =========================================================================
 cmd_prime() {
-  local project="" format="markdown" mode="compact" context=false
+  local project="" format="markdown" mode="compact" context=false budget="4000"
   local -a filter_files=()
 
   while [[ $# -gt 0 ]]; do
@@ -776,6 +777,8 @@ cmd_prime() {
       --json)      format="json"; shift ;;
       --xml)       format="xml"; shift ;;
       --plain)     format="plain"; shift ;;
+      --budget)    budget="$2"; shift 2 ;;
+      --no-limit)  budget="0"; shift ;;
       -*)          die "Unknown flag: $1" ;;
       *)           project="$1"; shift ;;
     esac
@@ -865,15 +868,107 @@ print(json.dumps({
   fi
 
   # Format output
-  HIVEMEM_RESPONSE="$response" python3 - "$project" "$format" "$mode" <<'PYEOF'
-import json, os, sys
+  HIVEMEM_RESPONSE="$response" python3 - "$project" "$format" "$mode" "$budget" <<'PYEOF'
+import json, math, os, sys
 
 project = sys.argv[1]
 fmt = sys.argv[2]
 mode = sys.argv[3]
+budget = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
 raw = os.environ.get("HIVEMEM_RESPONSE", "")
 
-TYPE_ORDER = ["convention", "pattern", "decision", "failure", "reference", "guide"]
+TYPE_ORDER = ["convention", "decision", "pattern", "guide", "failure", "reference"]
+CLASSIFICATION_ORDER = ["foundational", "tactical", "observational"]
+
+def sort_key(r):
+    """Sort by: type > classification > recency (newer first)."""
+    t = TYPE_ORDER.index(r["knowledge_type"]) if r["knowledge_type"] in TYPE_ORDER else len(TYPE_ORDER)
+    c = CLASSIFICATION_ORDER.index(r.get("classification", "tactical")) if r.get("classification", "tactical") in CLASSIFICATION_ORDER else len(CLASSIFICATION_ORDER)
+    ts = r.get("created_at") or r.get("updated_at") or ""
+    return (t, c, ts)
+
+def sort_records(records):
+    """Sort records by priority, newest first within same type+classification."""
+    s = sorted(records, key=lambda r: sort_key(r)[2], reverse=True)
+    return sorted(s, key=lambda r: sort_key(r)[:2])
+
+def estimate_tokens(text):
+    """Estimate token count: chars / 4, rounded up."""
+    return math.ceil(len(text) / 4)
+
+def record_text(r):
+    """Approximate rendered text for a record (for budget estimation)."""
+    line = f"[{r['knowledge_type']}] {r['title']} ({r['shortlink']})"
+    if r.get("summary"):
+        line += f" {r['summary']}"
+    return line
+
+def apply_budget(records, budget_tokens):
+    """Keep records in priority order until budget is exhausted. Returns (kept, dropped_count)."""
+    if budget_tokens <= 0:
+        return records, 0
+    used = 0
+    kept = []
+    for r in records:
+        cost = estimate_tokens(record_text(r))
+        if used + cost <= budget_tokens:
+            kept.append(r)
+            used += cost
+        # else: skip (dropped)
+    return kept, len(records) - len(kept)
+
+def budget_summary(dropped, fmt):
+    """Render truncation notice for the given format."""
+    if dropped <= 0:
+        return ""
+    hint = "use --budget <n> or --no-limit to show more"
+    s = "s" if dropped != 1 else ""
+    if fmt == "markdown":
+        return f"\n> ... and {dropped} more record{s} ({hint})\n"
+    elif fmt == "xml":
+        return f'  <truncated count="{dropped}" hint="{hint}"/>'
+    elif fmt == "plain":
+        return f"  ... and {dropped} more record{s} ({hint})"
+    return ""
+
+def render_rules():
+    """Render Rules section for full mode."""
+    return """## Rules
+- Before starting work, check existing knowledge with `/hm-search <query>` to avoid rediscovering known patterns.
+- Record new learnings as you work — conventions discovered, patterns applied, decisions made, failures encountered.
+- Use `/hm-record` to save knowledge. Include evidence links when possible.
+- Use `/hm-prime --files <paths>` for targeted priming when working on specific files.
+- Do NOT store project knowledge in other tools (mulch, notes, etc.) — use hivemem exclusively.
+"""
+
+def render_recording_examples():
+    """Render Recording New Learnings section for full mode."""
+    return """## Recording New Learnings
+
+Examples:
+```
+/hm-record convention always use shortlinks as primary identifier
+/hm-record pattern retry with exponential backoff on 429 errors
+/hm-record decision chose ParadeDB over pg_trgm for BM25 search
+/hm-record failure migration broke because column had NOT NULL without default
+/hm-record reference deploy docs at https://internal.wiki/deploy
+/hm-record guide how to set up local dev environment
+```
+
+**Required fields by type:**
+
+| Type | Required |
+|------|----------|
+| `convention` | description |
+| `pattern` | name, description |
+| `decision` | title, rationale |
+| `failure` | description, resolution |
+| `reference` | name, description |
+| `guide` | name, description |
+
+Link evidence: `--evidence-commit <sha>`, `--evidence-bead <id>`
+"""
+
 TYPE_LABELS = {
     "convention": ("Conventions", "rules and standards to follow"),
     "pattern": ("Patterns", "established approaches"),
@@ -883,25 +978,13 @@ TYPE_LABELS = {
     "guide": ("Guides", "how-to knowledge"),
 }
 
-try:
-    data = json.loads(json.loads(raw)["result"]["content"][0]["text"])
-except (json.JSONDecodeError, KeyError, IndexError):
+def render_empty(project, fmt):
+    """Render empty-state output for any format."""
+    from xml.sax.saxutils import escape as xml_escape
     if fmt == "json":
         print(json.dumps({"project": project, "records": [], "total": 0}))
     elif fmt == "xml":
-        print(f'<expertise project="{project}" records="0"/>')
-    else:
-        print(f"# Hivemem: no data for {project}")
-    sys.exit(0)
-
-records = data.get("results", [])
-total = data.get("total", 0)
-
-if not records:
-    if fmt == "json":
-        print(json.dumps({"project": project, "records": [], "total": 0}))
-    elif fmt == "xml":
-        print(f'<expertise project="{project}" records="0"/>')
+        print(f'<expertise project="{xml_escape(project)}" records="0"/>')
     elif fmt == "plain":
         print(f"Hivemem: no records for project '{project}'")
         print("Record knowledge with: /hm-record")
@@ -911,9 +994,42 @@ if not records:
         print("Record knowledge with: /hm-record")
     sys.exit(0)
 
+def render_markdown_header(project, total):
+    """Render the shared markdown header block."""
+    print(f"# Project Knowledge: {project} ({total} records)")
+    print()
+    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
+    print()
+
+try:
+    data = json.loads(json.loads(raw)["result"]["content"][0]["text"])
+except (json.JSONDecodeError, KeyError, IndexError):
+    render_empty(project, fmt)
+
+records = sort_records(data.get("results", []))
+total = data.get("total", 0)
+
+# Apply token budget (0 = no limit, json ignores budget)
+dropped = 0
+if budget > 0 and fmt != "json":
+    records, dropped = apply_budget(records, budget)
+
+if not records:
+    render_empty(project, fmt)
+
 by_type = {}
 for r in records:
     by_type.setdefault(r["knowledge_type"], []).append(r)
+
+def group_by_domain(records):
+    """Group records by first tag (domain). Tagless records go under 'General'."""
+    domains = {}
+    for r in records:
+        tags = r.get("tags") or []
+        domain = tags[0] if tags else "General"
+        domains.setdefault(domain, []).append(r)
+    # Sort domains alphabetically, but General last
+    return dict(sorted(domains.items(), key=lambda x: (x[0] == "General", x[0])))
 
 # --- JSON format ---
 if fmt == "json":
@@ -932,6 +1048,8 @@ if fmt == "xml":
             title = escape(r["title"])
             cls = r.get("classification", "")
             print(f'  <{ktype} shortlink="{sl}" classification="{cls}" tags="{escape(tags)}">{title}</{ktype}>')
+    if dropped > 0:
+        print(budget_summary(dropped, "xml"))
     print('</expertise>')
     print('<session_close_protocol priority="critical">')
     print('  <instruction>Before ending this session, review work for recordable learnings</instruction>')
@@ -953,18 +1071,26 @@ if fmt == "plain":
                 line += f"\n    {r['summary']}"
             print(line)
     else:
-        for ktype in TYPE_ORDER:
-            recs = by_type.get(ktype, [])
-            if not recs:
-                continue
-            label, desc = TYPE_LABELS[ktype]
-            print(f"{label} -- {desc}")
-            for r in recs:
-                line = f"  - {r['title']} ({r['shortlink']})"
-                if r.get("summary"):
-                    line += f"\n    {r['summary']}"
-                print(line)
+        for domain, domain_recs in group_by_domain(records).items():
+            print(f"{domain}")
+            print("-" * len(domain))
+            domain_by_type = {}
+            for r in domain_recs:
+                domain_by_type.setdefault(r["knowledge_type"], []).append(r)
+            for ktype in TYPE_ORDER:
+                recs = domain_by_type.get(ktype, [])
+                if not recs:
+                    continue
+                label, desc = TYPE_LABELS[ktype]
+                print(f"  {label} -- {desc}")
+                for r in recs:
+                    line = f"    - {r['title']} ({r['shortlink']})"
+                    if r.get("summary"):
+                        line += f"\n      {r['summary']}"
+                    print(line)
             print()
+    if dropped > 0:
+        print(budget_summary(dropped, "plain"))
     print()
     print("Quick Reference")
     print("-" * 30)
@@ -982,10 +1108,7 @@ if fmt == "plain":
 
 # --- Markdown format ---
 if mode == "compact":
-    print(f"# Project Knowledge: {project} ({total} records)")
-    print()
-    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
-    print()
+    render_markdown_header(project, total)
     for r in records:
         sl = r["shortlink"]
         ktype = r["knowledge_type"]
@@ -996,22 +1119,31 @@ if mode == "compact":
             line += f"\n  {summary}"
         print(line)
 else:
-    print(f"# Project Knowledge: {project} ({total} records)")
-    print()
-    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
-    print()
-    for ktype in TYPE_ORDER:
-        recs = by_type.get(ktype, [])
-        if not recs:
-            continue
-        label, desc = TYPE_LABELS[ktype]
-        print(f"## {label} — {desc}")
-        for r in recs:
-            line = f"- [{r['shortlink']}] {r['title']}"
-            if r.get("summary"):
-                line += f"\n  {r['summary']}"
-            print(line)
+    render_markdown_header(project, total)
+    print(render_rules())
+    for domain, domain_recs in group_by_domain(records).items():
+        print(f"## {domain}")
+        # Sub-group by type within domain
+        domain_by_type = {}
+        for r in domain_recs:
+            domain_by_type.setdefault(r["knowledge_type"], []).append(r)
+        for ktype in TYPE_ORDER:
+            recs = domain_by_type.get(ktype, [])
+            if not recs:
+                continue
+            label, desc = TYPE_LABELS[ktype]
+            print(f"### {label} — {desc}")
+            for r in recs:
+                line = f"- [{r['shortlink']}] {r['title']}"
+                if r.get("summary"):
+                    line += f"\n  {r['summary']}"
+                print(line)
         print()
+
+    print(render_recording_examples())
+
+if dropped > 0:
+    print(budget_summary(dropped, "markdown"))
 
 print()
 print("## Quick Reference")
@@ -1128,6 +1260,199 @@ configure_hooks() {
         echo "$settings" | jq . > "$claude_settings"
         ok "Hooks configured: SessionStart + PreCompact -> hivemem prime"
       fi
+      ;;
+  esac
+}
+
+# =========================================================================
+# validate — Check record health (usable as pre-commit hook)
+# =========================================================================
+cmd_validate() {
+  local quiet=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --quiet|-q) quiet=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local project
+  project="$(basename "$(pwd)")"
+
+  # Check server reachability
+  local health_url="${MCP_URL%/mcp}/health"
+  local health_status
+  health_status="$(curl -sk -o /dev/null -w '%{http_code}' "$health_url" 2>/dev/null || echo "000")"
+
+  if [[ "$health_status" != "200" ]]; then
+    echo "FAIL: hivemem server unreachable at $MCP_URL"
+    return 1
+  fi
+
+  $quiet || echo "hivemem validate: $project"
+
+  # Fetch records
+  local token mcp_url
+  mcp_url="$MCP_URL"
+  token="$(resolve_token 2>/dev/null || true)"
+
+  for cfg in ".mcp.json" "$GLOBAL_MCP_CONFIG"; do
+    if [[ -f "$cfg" ]] && grep -q '"hivemem"' "$cfg" 2>/dev/null; then
+      mcp_url="$(python3 -c "import json; print(json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
+      token="$(python3 -c "import json; h=json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('headers',{}); print(h.get('Authorization','').removeprefix('Bearer '))" 2>/dev/null || true)"
+      [[ -n "$mcp_url" ]] && break
+    fi
+  done
+
+  local payload auth_header response
+  payload=$(HIVEMEM_P="$project" python3 -c "
+import json, os
+print(json.dumps({
+    'jsonrpc': '2.0', 'id': 1,
+    'method': 'tools/call',
+    'params': {'name': 'hivemem_search_tool', 'arguments': {'project': os.environ['HIVEMEM_P'], 'limit': 100}}
+}))
+")
+
+  auth_header=""
+  [[ -n "$token" ]] && auth_header="-H \"Authorization: Bearer $token\""
+
+  response="$(echo "$payload" | curl -sk -X POST "$mcp_url" \
+    -H "Content-Type: application/json" \
+    ${auth_header:+-H "Authorization: Bearer $token"} \
+    -d @- 2>/dev/null || true)"
+
+  if [[ -z "$response" ]]; then
+    echo "FAIL: could not fetch records"
+    return 1
+  fi
+
+  # Validate records
+  local result
+  result=$(HIVEMEM_RESPONSE="$response" python3 -c "
+import json, os, sys
+raw = os.environ.get('HIVEMEM_RESPONSE', '')
+try:
+    data = json.loads(json.loads(raw)['result']['content'][0]['text'])
+except:
+    print('FAIL:0:parse error')
+    sys.exit(0)
+
+records = data.get('results', [])
+total = data.get('total', 0)
+issues = []
+
+if total == 0:
+    issues.append('no records found')
+
+for r in records:
+    sl = r.get('shortlink', '?')
+    if not r.get('title'):
+        issues.append(f'{sl}: missing title')
+    if not r.get('knowledge_type'):
+        issues.append(f'{sl}: missing knowledge_type')
+    if not r.get('classification'):
+        issues.append(f'{sl}: missing classification')
+
+if issues:
+    print(f'FAIL:{total}:' + ';'.join(issues))
+else:
+    print(f'OK:{total}')
+")
+
+  local exit_code=0
+  if [[ "$result" == OK:* ]]; then
+    local count="${result#OK:}"
+    $quiet || ok "All $count records valid"
+  else
+    local count issues
+    count="$(echo "$result" | cut -d: -f2)"
+    issues="$(echo "$result" | cut -d: -f3-)"
+    echo "FAIL: $issues"
+    exit_code=1
+  fi
+  return $exit_code
+}
+
+# =========================================================================
+# configure_git_hooks — Install pre-commit hook for hivemem validate
+# =========================================================================
+configure_git_hooks() {
+  local action="install"
+  local project_dir="."
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check) action="check"; shift ;;
+      --remove) action="remove"; shift ;;
+      *) project_dir="$1"; shift ;;
+    esac
+  done
+
+  local hook_marker_start="# hivemem:start"
+  local hook_marker_end="# hivemem:end"
+  local hook_path="$project_dir/.git/hooks/pre-commit"
+
+  local hook_section
+  hook_section="$hook_marker_start
+# Run hivemem validate before committing
+if command -v hivemem >/dev/null 2>&1; then
+  hivemem validate --quiet
+  if [ \$? -ne 0 ]; then
+    echo \"hivemem validate failed. Commit aborted.\"
+    exit 1
+  fi
+fi
+$hook_marker_end"
+
+  case "$action" in
+    check)
+      if [[ ! -f "$hook_path" ]]; then
+        warn "Git pre-commit hook not found."
+        return 1
+      fi
+      if grep -q "$hook_marker_start" "$hook_path"; then
+        ok "Git pre-commit hook is installed."
+      else
+        warn "Git pre-commit hook exists but has no hivemem section."
+        return 1
+      fi
+      ;;
+    remove)
+      if [[ ! -f "$hook_path" ]] || ! grep -q "$hook_marker_start" "$hook_path"; then
+        skip "No hivemem section in pre-commit hook."
+        return 0
+      fi
+      # Remove the hivemem section
+      local content cleaned
+      content="$(cat "$hook_path")"
+      cleaned="$(echo "$content" | sed "/$hook_marker_start/,/$hook_marker_end/d" | sed '/^$/N;/^\n$/d')"
+      if [[ -z "$cleaned" || "$cleaned" == "#!/bin/sh" ]]; then
+        rm -f "$hook_path"
+        ok "Removed hivemem pre-commit hook (file deleted)."
+      else
+        echo "$cleaned" > "$hook_path"
+        ok "Removed hivemem section from pre-commit hook."
+      fi
+      ;;
+    install)
+      if [[ ! -d "$project_dir/.git" ]]; then
+        warn "Not a git repository — .git directory not found."
+        return 1
+      fi
+      if [[ -f "$hook_path" ]] && grep -q "$hook_marker_start" "$hook_path"; then
+        skip "Git pre-commit hook already installed."
+        return 0
+      fi
+      mkdir -p "$(dirname "$hook_path")"
+      if [[ -f "$hook_path" ]]; then
+        # Append to existing hook
+        printf '\n%s\n' "$hook_section" >> "$hook_path"
+      else
+        printf '#!/bin/sh\n\n%s\n' "$hook_section" > "$hook_path"
+      fi
+      chmod +x "$hook_path"
+      ok "Installed hivemem pre-commit git hook."
       ;;
   esac
 }
@@ -1272,6 +1597,7 @@ Commands:
     --context                       Filter to records relevant to git changes
     --files <paths...>              Filter to records relevant to specific files
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
+  validate [--quiet]              Check record health (pre-commit hook)
   status                          Check server health and config
   version                         Show version, check for updates
   update                          Self-update from GitHub releases
@@ -1320,6 +1646,7 @@ case "$cmd" in
   init)     cmd_init "$@" ;;
   prime)    cmd_prime "$@" ;;
   migrate)  cmd_migrate "$@" ;;
+  validate) cmd_validate "$@" ;;
   status)   cmd_status "$@" ;;
   version)  cmd_version "$@" ;;
   update)   cmd_update "$@" ;;
