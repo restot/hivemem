@@ -80,6 +80,7 @@ class KnowledgeRecord < ApplicationRecord
       knowledge_type: knowledge_type,
       classification: classification,
       project: project,
+      evidence: evidence,
       score: respond_to?(:bm25_score) ? bm25_score : nil
     }
   end

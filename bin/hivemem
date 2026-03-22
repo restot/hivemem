@@ -6,7 +6,7 @@
 #   setup              Bootstrap the hivemem server (TLS, auth, MCP config)
 #   onboard [PATH]     Onboard a project (inject CLAUDE.md, install skills)
 #   init               Install/update hivemem skills and configure MCP
-#   prime [PROJECT]    Output project knowledge for session priming
+#   prime [PROJECT] [OPTIONS]  Output project knowledge for session priming
 #   migrate [PATH]     Migrate mulch records from a project into hivemem
 #   status             Check hivemem server health
 #   version            Show version and check for updates
@@ -486,6 +486,93 @@ cmd_init() {
 }
 
 # =========================================================================
+# update_claude_md — Create/update hivemem block in CLAUDE.md
+#   $1 = target directory (default: .)
+#   $2 = project name (default: basename of $1)
+#   --update-only: skip creation, only update existing blocks
+# =========================================================================
+update_claude_md() {
+  local target_root="${1:-.}"
+  local proj_name="${2:-$(basename "$target_root")}"
+  local update_only=false
+  [[ "${3:-}" == "--update-only" ]] && update_only=true
+
+  info "CLAUDE.md integration"
+  local claude_md="$target_root/CLAUDE.md"
+
+  local hivemem_block
+  hivemem_block="$(cat <<BLOCKEOF
+<!-- hivemem:start -->
+## Project Knowledge (Hivemem)
+<!-- hivemem-onboard-v:2 -->
+
+This project uses [Hivemem]($GITHUB_URL) for persistent knowledge management via MCP.
+
+**At the start of every session**, run:
+\`\`\`
+/hm-prime $proj_name
+\`\`\`
+
+This loads project-specific conventions, patterns, decisions, and other learnings into your context.
+
+**Before completing your task**, review your work for insights worth preserving — conventions discovered,
+patterns applied, failures encountered, or decisions made — and record them:
+\`\`\`
+/hm-record $proj_name <convention|pattern|failure|decision|reference|guide> "description"
+\`\`\`
+
+Run \`/hm-status\` to check store health and record counts.
+Run \`/hm-search\` to find existing knowledge.
+<!-- hivemem:end -->
+BLOCKEOF
+)"
+
+  if [[ -f "$claude_md" ]]; then
+    if grep -q '<!-- hivemem:start -->' "$claude_md"; then
+      need python3
+      echo "$hivemem_block" | HIVEMEM_CLAUDE_MD="$claude_md" python3 -c "
+import re, sys, os
+
+block = sys.stdin.read().strip()
+claude_md = os.environ['HIVEMEM_CLAUDE_MD']
+
+with open(claude_md, 'r') as f:
+    content = f.read()
+
+new_content = re.sub(
+    r'<!-- hivemem:start -->.*?<!-- hivemem:end -->',
+    block,
+    content,
+    flags=re.DOTALL
+)
+
+if new_content == content:
+    sys.exit(2)
+
+with open(claude_md, 'w') as f:
+    f.write(new_content)
+"
+      rc=$?
+      if [[ $rc -eq 2 ]]; then
+        skip "CLAUDE.md hivemem block (unchanged)"
+      else
+        ok "Updated hivemem block in CLAUDE.md"
+      fi
+    elif ! $update_only; then
+      printf '\n%s\n' "$hivemem_block" >> "$claude_md"
+      ok "Appended hivemem block to CLAUDE.md"
+    else
+      skip "CLAUDE.md (no hivemem block found)"
+    fi
+  elif ! $update_only; then
+    printf '%s\n' "$hivemem_block" > "$claude_md"
+    ok "Created CLAUDE.md with hivemem block"
+  else
+    skip "CLAUDE.md (not found)"
+  fi
+}
+
+# =========================================================================
 # onboard — Onboard a project (CLAUDE.md + skills)
 # =========================================================================
 cmd_onboard() {
@@ -521,74 +608,7 @@ cmd_onboard() {
   fi
 
   # --- CLAUDE.md ---
-  info "CLAUDE.md integration"
-  local claude_md="$target_root/CLAUDE.md"
-
-  local hivemem_block
-  hivemem_block="$(cat <<BLOCKEOF
-<!-- hivemem:start -->
-## Project Knowledge (Hivemem)
-<!-- hivemem-onboard-v:1 -->
-
-This project uses [Hivemem]($GITHUB_URL) for persistent knowledge management via MCP.
-
-**At the start of every session**, run:
-\`\`\`
-/hm-prime $proj_name
-\`\`\`
-
-This loads project-specific conventions, patterns, decisions, and other learnings into your context.
-
-**Before completing your task**, review your work for insights worth preserving — conventions discovered,
-patterns applied, failures encountered, or decisions made — and record them:
-\`\`\`
-/hm-record $proj_name <convention|pattern|failure|decision|reference|guide> "description"
-\`\`\`
-
-Run \`/hm-status\` to check store health and record counts.
-Run \`/hm-search\` to find existing knowledge.
-<!-- hivemem:end -->
-BLOCKEOF
-)"
-
-  if [[ -f "$claude_md" ]]; then
-    if grep -q '<!-- hivemem:start -->' "$claude_md"; then
-      need python3
-      echo "$hivemem_block" | python3 -c "
-import re, sys
-
-block = sys.stdin.read().strip()
-
-with open('$claude_md', 'r') as f:
-    content = f.read()
-
-new_content = re.sub(
-    r'<!-- hivemem:start -->.*?<!-- hivemem:end -->',
-    block,
-    content,
-    flags=re.DOTALL
-)
-
-if new_content == content:
-    sys.exit(2)
-
-with open('$claude_md', 'w') as f:
-    f.write(new_content)
-"
-      rc=$?
-      if [[ $rc -eq 2 ]]; then
-        skip "CLAUDE.md hivemem block (unchanged)"
-      else
-        ok "Updated hivemem block in CLAUDE.md"
-      fi
-    else
-      printf '\n%s\n' "$hivemem_block" >> "$claude_md"
-      ok "Appended hivemem block to CLAUDE.md"
-    fi
-  else
-    printf '%s\n' "$hivemem_block" > "$claude_md"
-    ok "Created CLAUDE.md with hivemem block"
-  fi
+  update_claude_md "$target_root" "$proj_name"
 
   # --- Mulch migration ---
   if $migrate; then
@@ -752,7 +772,25 @@ print(json.dumps(payload))
 # prime — Output project knowledge for session priming (used by hooks)
 # =========================================================================
 cmd_prime() {
-  local project="${1:-$(basename "$(pwd)")}"
+  local project="" format="markdown" mode="compact" context=false
+  local -a filter_files=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format)    format="$2"; shift 2 ;;
+      --full)      mode="full"; shift ;;
+      --compact)   mode="compact"; shift ;;
+      --context)   context=true; shift ;;
+      --files)     shift; while [[ $# -gt 0 ]] && [[ "$1" != --* ]]; do filter_files+=("$1"); shift; done ;;
+      --json)      format="json"; shift ;;
+      --xml)       format="xml"; shift ;;
+      --plain)     format="plain"; shift ;;
+      -*)          die "Unknown flag: $1" ;;
+      *)           project="$1"; shift ;;
+    esac
+  done
+
+  project="${project:-$(basename "$(pwd)")}"
 
   need python3
   need curl
@@ -771,16 +809,53 @@ cmd_prime() {
   mcp_url="${mcp_url:-$MCP_URL}"
   token="${token:-$(resolve_token)}"
 
-  # Fetch records
+  # Context filtering: build search query from git changes or explicit files
+  local search_query=""
+  if $context; then
+    local changed_files
+    changed_files="$(
+      { git diff --name-only HEAD~1 2>/dev/null || true
+        git diff --name-only --cached 2>/dev/null || true
+        git diff --name-only 2>/dev/null || true
+      } | sort -u
+    )"
+    if [[ -n "$changed_files" ]]; then
+      search_query="$(echo "$changed_files" | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
+    fi
+  fi
+
+  if [[ ${#filter_files[@]} -gt 0 ]]; then
+    search_query="$(printf '%s\n' "${filter_files[@]}" | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
+  fi
+
+  # Build JSON-RPC payload
   local payload
-  payload=$(python3 -c "
-import json
+  if [[ -n "$search_query" ]]; then
+    payload=$(HIVEMEM_Q="$search_query" HIVEMEM_P="$project" python3 -c "
+import json, os
 print(json.dumps({
     'jsonrpc': '2.0', 'id': 1,
     'method': 'tools/call',
-    'params': {'name': 'hivemem_search_tool', 'arguments': {'project': '$project', 'limit': 50}}
+    'params': {'name': 'hivemem_search_tool', 'arguments': {
+        'project': os.environ['HIVEMEM_P'],
+        'query': os.environ['HIVEMEM_Q'],
+        'limit': 50
+    }}
 }))
 ")
+  else
+    payload=$(HIVEMEM_P="$project" python3 -c "
+import json, os
+print(json.dumps({
+    'jsonrpc': '2.0', 'id': 1,
+    'method': 'tools/call',
+    'params': {'name': 'hivemem_search_tool', 'arguments': {
+        'project': os.environ['HIVEMEM_P'],
+        'limit': 50
+    }}
+}))
+")
+  fi
 
   local auth_header=""
   [[ -n "$token" ]] && auth_header="Authorization: Bearer $token"
@@ -799,33 +874,16 @@ print(json.dumps({
   fi
 
   # Format output
-  HIVEMEM_RESPONSE="$response" python3 - "$project" <<'PYEOF'
+  HIVEMEM_RESPONSE="$response" python3 - "$project" "$format" "$mode" <<'PYEOF'
 import json, os, sys
 
 project = sys.argv[1]
+fmt = sys.argv[2]
+mode = sys.argv[3]
 raw = os.environ.get("HIVEMEM_RESPONSE", "")
 
-try:
-    data = json.loads(json.loads(raw)["result"]["content"][0]["text"])
-except (json.JSONDecodeError, KeyError, IndexError):
-    print(f"# Hivemem: no data for {project}")
-    sys.exit(0)
-
-records = data.get("results", [])
-total = data.get("total", 0)
-
-if not records:
-    print(f"# Hivemem: no records for project '{project}'")
-    print("")
-    print("Record knowledge with: /hm-record")
-    sys.exit(0)
-
-# Group by type
-by_type = {}
-for r in records:
-    by_type.setdefault(r["knowledge_type"], []).append(r)
-
-type_labels = {
+TYPE_ORDER = ["convention", "pattern", "decision", "failure", "reference", "guide"]
+TYPE_LABELS = {
     "convention": ("Conventions", "rules and standards to follow"),
     "pattern": ("Patterns", "established approaches"),
     "decision": ("Decisions", "past choices and rationale"),
@@ -834,29 +892,133 @@ type_labels = {
     "guide": ("Guides", "how-to knowledge"),
 }
 
-print(f"# Project Knowledge: {project} ({total} records)")
-print("")
+try:
+    data = json.loads(json.loads(raw)["result"]["content"][0]["text"])
+except (json.JSONDecodeError, KeyError, IndexError):
+    if fmt == "json":
+        print(json.dumps({"project": project, "records": [], "total": 0}))
+    elif fmt == "xml":
+        print(f'<expertise project="{project}" records="0"/>')
+    else:
+        print(f"# Hivemem: no data for {project}")
+    sys.exit(0)
 
-for ktype in ["convention", "pattern", "decision", "failure", "reference", "guide"]:
-    recs = by_type.get(ktype, [])
-    if not recs:
-        continue
-    label, desc = type_labels[ktype]
-    print(f"## {label} — {desc}")
-    for r in recs:
+records = data.get("results", [])
+total = data.get("total", 0)
+
+if not records:
+    if fmt == "json":
+        print(json.dumps({"project": project, "records": [], "total": 0}))
+    elif fmt == "xml":
+        print(f'<expertise project="{project}" records="0"/>')
+    elif fmt == "plain":
+        print(f"Hivemem: no records for project '{project}'")
+        print("Record knowledge with: /hm-record")
+    else:
+        print(f"# Hivemem: no records for project '{project}'")
+        print("")
+        print("Record knowledge with: /hm-record")
+    sys.exit(0)
+
+by_type = {}
+for r in records:
+    by_type.setdefault(r["knowledge_type"], []).append(r)
+
+# --- JSON format ---
+if fmt == "json":
+    print(json.dumps({"project": project, "records": records, "total": total}, indent=2))
+    sys.exit(0)
+
+# --- XML format ---
+if fmt == "xml":
+    from xml.sax.saxutils import escape
+    print(f'<expertise project="{escape(project)}" records="{total}">')
+    for ktype in TYPE_ORDER:
+        for r in by_type.get(ktype, []):
+            sl = r["shortlink"]
+            tags = " ".join(r.get("tags") or [])
+            title = escape(r["title"])
+            cls = r.get("classification", "")
+            print(f'  <{ktype} shortlink="{sl}" classification="{cls}" tags="{escape(tags)}">{title}</{ktype}>')
+    print('</expertise>')
+    print('<session_close_protocol priority="critical">')
+    print('  <instruction>Before ending this session, review work for recordable learnings</instruction>')
+    print('  <step>Run /hm-record to capture conventions, patterns, decisions, failures</step>')
+    print('  <warning>NEVER skip this. Unrecorded learnings are lost for the next session.</warning>')
+    print('</session_close_protocol>')
+    sys.exit(0)
+
+# --- Plain format ---
+if fmt == "plain":
+    print(f"Project Knowledge: {project} ({total} records)")
+    print("=" * 50)
+    print()
+    if mode == "compact":
+        for r in records:
+            print(f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})")
+    else:
+        for ktype in TYPE_ORDER:
+            recs = by_type.get(ktype, [])
+            if not recs:
+                continue
+            label, desc = TYPE_LABELS[ktype]
+            print(f"{label} -- {desc}")
+            for r in recs:
+                print(f"  - {r['title']} ({r['shortlink']})")
+            print()
+    print()
+    print("Quick Reference")
+    print("-" * 30)
+    print("  /hm-record          Record knowledge from this session")
+    print("  /hm-search <query>  Search knowledge records")
+    print("  /hm-prime           Reload project knowledge")
+    print("  /hm-read <id>       Read full record details")
+    print()
+    print("=== CRITICAL SESSION CLOSE PROTOCOL ===")
+    print("Before ending this session, you MUST:")
+    print("[ ] 1. Review your work for recordable learnings")
+    print("[ ] 2. Run /hm-record to capture conventions, patterns, decisions, failures")
+    print("NEVER skip this. Unrecorded learnings are lost for the next session.")
+    sys.exit(0)
+
+# --- Markdown format ---
+if mode == "compact":
+    print(f"# Project Knowledge: {project} ({total} records)")
+    print()
+    for r in records:
         sl = r["shortlink"]
+        ktype = r["knowledge_type"]
         title = r["title"]
-        print(f"- [{sl}] {title}")
-    print("")
+        print(f"- [{ktype}] {title} ({sl})")
+else:
+    print(f"# Project Knowledge: {project} ({total} records)")
+    print()
+    for ktype in TYPE_ORDER:
+        recs = by_type.get(ktype, [])
+        if not recs:
+            continue
+        label, desc = TYPE_LABELS[ktype]
+        print(f"## {label} — {desc}")
+        for r in recs:
+            print(f"- [{r['shortlink']}] {r['title']}")
+        print()
 
-# Session close protocol
+print()
+print("## Quick Reference")
+print("- `/hm-record` — record knowledge from this session")
+print("- `/hm-search <query>` — search knowledge records")
+print("- `/hm-prime` — reload project knowledge")
+print("- `/hm-read <shortlink>` — read full record details")
+print()
 print("---")
-print("")
-print("# SESSION CLOSE PROTOCOL")
-print("CRITICAL: Before ending this session, you MUST:")
-print("1. Review your work for recordable learnings")
-print("2. Run `/hm-record` to capture conventions, patterns, decisions, failures")
-print("NEVER skip this. Unrecorded learnings are lost for the next session.")
+print()
+print("# CRITICAL SESSION CLOSE PROTOCOL")
+print("**CRITICAL**: Before ending this session, you MUST run this checklist:")
+print("```")
+print("[ ] 1. Review your work for recordable learnings")
+print("[ ] 2. Run /hm-record to capture conventions, patterns, decisions, failures")
+print("```")
+print("**NEVER** skip this. Unrecorded learnings are lost for the next session.")
 PYEOF
 }
 
@@ -1007,6 +1169,10 @@ cmd_update() {
   # Update skills from the new version's repo
   echo ""
   cmd_install_skills
+
+  # Update CLAUDE.md in current project if onboarded
+  echo ""
+  update_claude_md "$(pwd)" "$(basename "$(pwd)")" --update-only
 }
 
 # =========================================================================
@@ -1027,7 +1193,12 @@ Commands:
   init [OPTIONS]                  Install skills, configure MCP, set up hooks
     --global                        Write to ~/.mcp.json (for hosted instance)
     --project PATH                  Target project dir (default: cwd)
-  prime [PROJECT]                 Output project knowledge (auto-runs via hooks)
+  prime [PROJECT] [OPTIONS]       Output project knowledge (auto-runs via hooks)
+    --compact                       One-line per record (default)
+    --full                          Grouped by type with headers
+    --format <markdown|xml|plain|json>  Output format (default: markdown)
+    --context                       Filter to records relevant to git changes
+    --files <paths...>              Filter to records relevant to specific files
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   status                          Check server health and config
   version                         Show version, check for updates

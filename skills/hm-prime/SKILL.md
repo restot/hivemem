@@ -5,39 +5,60 @@ description: Prime the current session with hivemem knowledge. Use when starting
 
 Prime the current session with relevant hivemem knowledge.
 
-Arguments: $ARGUMENTS (project name, or "all" for cross-project knowledge)
+Arguments: $ARGUMENTS (project name, "all" for cross-project, or "full" for grouped-by-type view)
 
 Steps:
-1. Parse the argument as the project name. If no argument given, use the current project directory name (basename of cwd). If "all", omit the project filter.
+1. Parse arguments. If no argument given, use current project directory name (basename of cwd). If "all", omit the project filter. If "full" is anywhere in args, use full mode.
 2. Call `hivemem_search_tool` with:
    - `project`: the project name (omit if "all")
    - `limit`: 50
    - No query text (browse mode)
-3. For each record returned, display a one-line summary:
-   `[shortlink] title (type) — first ~100 chars of content`
+3. Display records in **compact mode** (default) — one line per record:
+   ```
+   # Project Knowledge: <project> (<N> records)
 
-4. After listing all records, produce a structured summary organized by type:
+   - [convention] MCP config goes in .mcp.json (hm-nEEsMbi)
+   - [pattern] trust_server_cert extracts CA root (hm-RB3OKl8)
+   - [failure] NODE_EXTRA_CA_CERTS needs CA cert → use CA root (hm-Wl9TxIR)
+   ...
+   ```
 
-   **Conventions** — rules and standards to follow:
-   - (list each convention as a bullet)
+   Or in **full mode** (if "full" in args) — grouped by type:
+   ```
+   # Project Knowledge: <project> (<N> records)
 
-   **Patterns** — established approaches:
-   - (list each pattern as a bullet)
+   ## Conventions — rules and standards to follow
+   - [hm-nEEsMbi] MCP config goes in .mcp.json, not settings.json
+   ...
 
-   **Decisions** — past choices and their rationale:
-   - (list each decision as a bullet)
+   ## Patterns — established approaches
+   ...
+   ```
 
-   **Failures** — things that went wrong and how they were fixed:
-   - (list each failure as a bullet)
+   Type order: convention, pattern, decision, failure, reference, guide.
+   Only include type sections that have records.
 
-   **References** — useful resources and links:
-   - (list each reference as a bullet)
+4. Always append Quick Reference and Session Close Protocol:
+   ```
+   ## Quick Reference
+   - `/hm-record` — record knowledge from this session
+   - `/hm-search <query>` — search knowledge records
+   - `/hm-prime` — reload project knowledge
+   - `/hm-read <shortlink>` — read full record details
 
-   **Guides** — how-to knowledge:
-   - (list each guide as a bullet)
+   ---
 
-   Only include sections that have records. This summary should inform the rest of the current session.
+   # CRITICAL SESSION CLOSE PROTOCOL
+   **CRITICAL**: Before ending this session, you MUST run this checklist:
+   ```
+   [ ] 1. Review your work for recordable learnings
+   [ ] 2. Run /hm-record to capture conventions, patterns, decisions, failures
+   ```
+   **NEVER** skip this. Unrecorded learnings are lost for the next session.
+   ```
 
 Examples:
+- `/hm-prime` — prime with current project knowledge (compact)
 - `/hm-prime hivemem` — prime with hivemem project knowledge
+- `/hm-prime full` — prime with grouped-by-type view
 - `/hm-prime all` — prime with all cross-project knowledge
