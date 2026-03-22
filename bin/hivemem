@@ -89,6 +89,75 @@ find_project_root() {
   die "Cannot find hivemem project root. Set HIVEMEM_PROJECT_ROOT or run from the hivemem directory."
 }
 
+# Fetch and trust the server's CA certificate
+# Usage: trust_server_cert <host:port>
+trust_server_cert() {
+  local hostport="${1:?Usage: trust_server_cert host:port}"
+  local cert_dir="$HOME/.hivemem"
+  local ca_file="$cert_dir/ca.pem"
+
+  need openssl
+
+  mkdir -p "$cert_dir"
+
+  info "TLS certificate setup"
+
+  # Check if TLS already works
+  if curl -s --connect-timeout 3 "https://$hostport/health" >/dev/null 2>&1; then
+    skip "TLS already trusted for $hostport"
+    return 0
+  fi
+
+  # Fetch the server certificate chain
+  local cert_chain
+  cert_chain="$(openssl s_client -connect "$hostport" -servername "${hostport%%:*}" \
+    </dev/null 2>/dev/null | openssl x509 -outform PEM 2>/dev/null || true)"
+
+  if [[ -z "$cert_chain" ]]; then
+    warn "Could not fetch certificate from $hostport"
+    return 1
+  fi
+
+  # Save CA cert
+  echo "$cert_chain" > "$ca_file"
+  ok "CA cert saved -> $ca_file"
+
+  # Trust on macOS system keychain
+  if [[ "$(uname)" == "Darwin" ]]; then
+    info "Trusting CA cert on macOS (requires sudo)"
+    if sudo security add-trusted-cert -d -r trustRoot \
+      -k /Library/Keychains/System.keychain "$ca_file" 2>/dev/null; then
+      ok "CA cert trusted in system keychain"
+    else
+      warn "Could not add to system keychain. You may need to trust manually."
+    fi
+  fi
+
+  # Set NODE_EXTRA_CA_CERTS in Claude Code settings so MCP client trusts the cert
+  local claude_settings="$HOME/.claude/settings.json"
+  if [[ -f "$claude_settings" ]]; then
+    need python3
+    python3 - "$claude_settings" "$ca_file" <<'PYEOF'
+import json, sys
+
+settings_file, ca_path = sys.argv[1], sys.argv[2]
+
+with open(settings_file, "r") as f:
+    settings = json.load(f)
+
+settings.setdefault("env", {})
+settings["env"]["NODE_EXTRA_CA_CERTS"] = ca_path
+
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+    ok "NODE_EXTRA_CA_CERTS=$ca_file -> $claude_settings"
+  else
+    warn "Claude Code settings not found. Set NODE_EXTRA_CA_CERTS=$ca_file manually."
+  fi
+}
+
 # Configure MCP endpoint in .mcp.json
 # Usage: configure_mcp <url> <token> [target_file]
 # target_file defaults to <cwd>/.mcp.json (per-project, local-first)
@@ -104,7 +173,7 @@ import json, sys
 
 mcp_url, token, mcp_file = sys.argv[1], sys.argv[2], sys.argv[3]
 
-entry = {"type": "url", "url": mcp_url}
+entry = {"type": "http", "url": mcp_url}
 if token:
     entry["headers"] = {"Authorization": f"Bearer {token}"}
 
@@ -216,21 +285,54 @@ cmd_setup() {
   info "Claude Code MCP config"
   configure_mcp "$LOCAL_MCP_URL" "$token" "$project_root/.mcp.json"
 
+  # --- 4. Trust CA cert ---
+  # Copy to ~/.hivemem/ca.pem and trust on macOS + set NODE_EXTRA_CA_CERTS
+  local hivemem_dir="$HOME/.hivemem"
+  mkdir -p "$hivemem_dir"
+  if [[ -f "$certs_dir/hivemem-ca.pem" ]]; then
+    cp "$certs_dir/hivemem-ca.pem" "$hivemem_dir/ca.pem"
+    ok "CA cert -> $hivemem_dir/ca.pem"
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+      info "Trusting CA cert on macOS (requires sudo)"
+      if sudo security add-trusted-cert -d -r trustRoot \
+        -k /Library/Keychains/System.keychain "$hivemem_dir/ca.pem" 2>/dev/null; then
+        ok "CA cert trusted in system keychain"
+      else
+        warn "Could not add to system keychain"
+      fi
+    fi
+
+    # Set NODE_EXTRA_CA_CERTS for Claude Code
+    local claude_settings="$HOME/.claude/settings.json"
+    if [[ -f "$claude_settings" ]]; then
+      python3 - "$claude_settings" "$hivemem_dir/ca.pem" <<'PYEOF'
+import json, sys
+settings_file, ca_path = sys.argv[1], sys.argv[2]
+with open(settings_file, "r") as f:
+    settings = json.load(f)
+settings.setdefault("env", {})
+settings["env"]["NODE_EXTRA_CA_CERTS"] = ca_path
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+      ok "NODE_EXTRA_CA_CERTS -> $claude_settings"
+    fi
+  fi
+
   echo ""
   info "Setup complete"
   echo ""
   echo "  MCP endpoint:  $LOCAL_MCP_URL"
   echo "  TLS certs:     $certs_dir/"
+  echo "  CA cert:       $hivemem_dir/ca.pem (trusted)"
   echo "  Auth token:    .env (HIVEMEM_AUTH_TOKEN)"
   echo "  MCP config:    $project_root/.mcp.json (local)"
   echo ""
   echo "  Next steps:"
   echo "    cd $project_root && docker compose up -d"
   echo "    hivemem onboard /path/to/your/project"
-  echo ""
-  echo "  To trust the CA on macOS (optional):"
-  echo "    sudo security add-trusted-cert -d -r trustRoot \\"
-  echo "      -k /Library/Keychains/System.keychain $certs_dir/hivemem-ca.pem"
   echo ""
 }
 
@@ -340,6 +442,21 @@ cmd_init() {
       fi
     fi
   fi
+
+  # --- TLS cert trust ---
+  local server_host
+  server_host="$(echo "$target_url" | sed -E 's|https?://([^/]+).*|\1|')"
+  # Add default port if not specified
+  if [[ "$server_host" != *:* ]]; then
+    if [[ "$target_url" == https://* ]]; then
+      server_host="$server_host:443"
+    else
+      server_host="$server_host:80"
+    fi
+  fi
+
+  echo ""
+  trust_server_cert "$server_host"
 
   if $use_global; then
     echo ""
