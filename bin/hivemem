@@ -463,7 +463,7 @@ cmd_init() {
   # --- Lifecycle hooks ---
   echo ""
   info "Lifecycle hooks"
-  configure_hooks
+  configure_hooks "$target_dir"
 
   if $use_global; then
     echo ""
@@ -1035,48 +1035,101 @@ PYEOF
 # =========================================================================
 # configure_hooks — Set up Claude Code SessionStart/PreCompact hooks
 # =========================================================================
+# Writes to project-level .claude/settings.json (matches mulch pattern).
+# Usage: configure_hooks [--check|--remove] [dir]
 configure_hooks() {
-  local claude_settings="$HOME/.claude/settings.json"
+  local action="install"
+  local project_dir="."
 
-  [[ -f "$claude_settings" ]] || return 0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check) action="check"; shift ;;
+      --remove) action="remove"; shift ;;
+      *) project_dir="$1"; shift ;;
+    esac
+  done
 
-  need python3
+  local claude_settings="$project_dir/.claude/settings.json"
+  local hook_command="hivemem prime"
+  local hook_group='{"matcher":"","hooks":[{"type":"command","command":"hivemem prime"}]}'
 
-  python3 - "$claude_settings" <<'PYEOF'
-import json, sys
+  need jq
 
-settings_file = sys.argv[1]
+  # Load existing settings or start empty
+  local settings='{}'
+  if [[ -f "$claude_settings" ]]; then
+    settings="$(cat "$claude_settings")"
+  fi
 
-with open(settings_file, "r") as f:
-    settings = json.load(f)
+  # Ensure .hooks exists
+  settings="$(echo "$settings" | jq '.hooks //= {}')"
 
-hooks = settings.setdefault("hooks", {})
+  # Helper: check if an event already has the hivemem hook
+  _has_hook() {
+    echo "$settings" | jq -e \
+      --arg evt "$1" --arg cmd "$hook_command" \
+      '.hooks[$evt] // [] | any(.[]; .hooks[]? | .command == $cmd)' \
+      >/dev/null 2>&1
+  }
 
-hivemem_hook = {
-    "type": "command",
-    "command": "hivemem prime"
-}
+  case "$action" in
+    check)
+      local missing=()
+      for event in SessionStart PreCompact; do
+        _has_hook "$event" || missing+=("$event")
+      done
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        ok "Hooks installed and correct."
+      else
+        local IFS=','
+        warn "Missing hooks: ${missing[*]}"
+        return 1
+      fi
+      ;;
 
-for event in ["SessionStart", "PreCompact"]:
-    event_hooks = hooks.setdefault(event, [])
-    # Check if hivemem hook already exists
-    already = False
-    for entry in event_hooks:
-        for h in entry.get("hooks", []):
-            if "hivemem prime" in h.get("command", ""):
-                already = True
-                break
-        if already:
-            break
-    if not already:
-        event_hooks.append({"hooks": [hivemem_hook]})
+    remove)
+      local removed=false
+      for event in SessionStart PreCompact; do
+        if _has_hook "$event"; then
+          settings="$(echo "$settings" | jq \
+            --arg evt "$event" --arg cmd "$hook_command" \
+            '.hooks[$evt] = [.hooks[$evt][]? | select(.hooks | all(.command != $cmd))]')"
+          removed=true
+        fi
+      done
+      # Clean up empty event arrays and empty hooks object
+      settings="$(echo "$settings" | jq '
+        .hooks |= with_entries(select(.value | length > 0))
+        | if .hooks == {} then del(.hooks) else . end
+      ')"
+      mkdir -p "$(dirname "$claude_settings")"
+      echo "$settings" | jq . > "$claude_settings"
+      if $removed; then
+        ok "Removed hivemem hooks from $claude_settings"
+      else
+        skip "No hivemem hooks found in $claude_settings"
+      fi
+      ;;
 
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-PYEOF
-
-  ok "Hooks configured: SessionStart + PreCompact -> hivemem prime"
+    install)
+      local already=true
+      for event in SessionStart PreCompact; do
+        if ! _has_hook "$event"; then
+          settings="$(echo "$settings" | jq \
+            --arg evt "$event" --argjson grp "$hook_group" \
+            '.hooks[$evt] = (.hooks[$evt] // []) + [$grp]')"
+          already=false
+        fi
+      done
+      if $already; then
+        skip "Hooks already installed."
+      else
+        mkdir -p "$(dirname "$claude_settings")"
+        echo "$settings" | jq . > "$claude_settings"
+        ok "Hooks configured: SessionStart + PreCompact -> hivemem prime"
+      fi
+      ;;
+  esac
 }
 
 # =========================================================================
@@ -1180,7 +1233,16 @@ cmd_update() {
   echo ""
   cmd_install_skills
 
-  # Update CLAUDE.md in current project if onboarded
+  # Migrate: remove old global hooks (only hivemem's, not others)
+  if [[ -f "$HOME/.claude/settings.json" ]]; then
+    echo ""
+    info "Migrating hooks from global to project-level"
+    configure_hooks --remove "$HOME"
+  fi
+
+  # Update hooks in current project
+  echo ""
+  configure_hooks "$(pwd)"
   echo ""
   update_claude_md "$(pwd)" "$(basename "$(pwd)")" --update-only
 }
