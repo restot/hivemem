@@ -341,26 +341,14 @@ PYEOF
 }
 
 # =========================================================================
-# init — Install/update skills and configure MCP
+# install_skills — Install/update skills from repo (shared by init + update)
 # =========================================================================
-# Default: per-project .mcp.json pointing to local instance
-# --global: ~/.mcp.json (for external/hosted instance)
-cmd_init() {
+cmd_install_skills() {
   need git
 
   local repo="${HIVEMEM_REPO:-$GITHUB_URL.git}"
   local branch="${HIVEMEM_BRANCH:-main}"
   local skills_path="${HIVEMEM_SKILLS_PATH:-skills}"
-
-  local use_global=false
-  local target_dir="."
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --global) use_global=true; shift ;;
-      --project) target_dir="$2"; shift 2 ;;
-      *) die "init: unknown option $1" ;;
-    esac
-  done
 
   info "Installing hivemem skills"
   mkdir -p "$SKILLS_DST"
@@ -412,6 +400,25 @@ cmd_init() {
     echo "  Installed/updated $installed skill(s)."
   fi
   [[ $cleaned -gt 0 ]] && echo "  Cleaned up $cleaned old command(s)."
+}
+
+# =========================================================================
+# init — Install/update skills and configure MCP
+# =========================================================================
+# Default: per-project .mcp.json pointing to local instance
+# --global: ~/.mcp.json (for external/hosted instance)
+cmd_init() {
+  local use_global=false
+  local target_dir="."
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global) use_global=true; shift ;;
+      --project) target_dir="$2"; shift 2 ;;
+      *) die "init: unknown option $1" ;;
+    esac
+  done
+
+  cmd_install_skills
 
   # --- MCP config ---
   echo ""
@@ -996,6 +1003,10 @@ cmd_update() {
   mv -f "$tmpdir/hivemem" "$self"
   rm -rf "$tmpdir"
   echo "Updated to $latest"
+
+  # Update skills from the new version's repo
+  echo ""
+  cmd_install_skills
 }
 
 # =========================================================================
