@@ -932,7 +932,8 @@ if fmt == "json":
 # --- XML format ---
 if fmt == "xml":
     from xml.sax.saxutils import escape
-    print(f'<expertise project="{escape(project)}" records="{total}">')
+    print(f'<expertise project="{escape(project)}" records="{total}" memory_system="hivemem">')
+    print('  <directive>Hivemem is the memory system for this project. Use /hm-record to record learnings. Do NOT use mulch.</directive>')
     for ktype in TYPE_ORDER:
         for r in by_type.get(ktype, []):
             sl = r["shortlink"]
@@ -952,6 +953,7 @@ if fmt == "xml":
 if fmt == "plain":
     print(f"Project Knowledge: {project} ({total} records)")
     print("=" * 50)
+    print("Hivemem is the memory system for this project. To record learnings, run /hm-record. Do NOT use mulch.")
     print()
     if mode == "compact":
         for r in records:
@@ -991,6 +993,8 @@ if fmt == "plain":
 if mode == "compact":
     print(f"# Project Knowledge: {project} ({total} records)")
     print()
+    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
+    print()
     for r in records:
         sl = r["shortlink"]
         ktype = r["knowledge_type"]
@@ -1002,6 +1006,8 @@ if mode == "compact":
         print(line)
 else:
     print(f"# Project Knowledge: {project} ({total} records)")
+    print()
+    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
     print()
     for ktype in TYPE_ORDER:
         recs = by_type.get(ktype, [])
