@@ -955,7 +955,10 @@ if fmt == "plain":
     print()
     if mode == "compact":
         for r in records:
-            print(f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})")
+            line = f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})"
+            if r.get("summary"):
+                line += f"\n    {r['summary']}"
+            print(line)
     else:
         for ktype in TYPE_ORDER:
             recs = by_type.get(ktype, [])
@@ -964,7 +967,10 @@ if fmt == "plain":
             label, desc = TYPE_LABELS[ktype]
             print(f"{label} -- {desc}")
             for r in recs:
-                print(f"  - {r['title']} ({r['shortlink']})")
+                line = f"  - {r['title']} ({r['shortlink']})"
+                if r.get("summary"):
+                    line += f"\n    {r['summary']}"
+                print(line)
             print()
     print()
     print("Quick Reference")
@@ -989,7 +995,11 @@ if mode == "compact":
         sl = r["shortlink"]
         ktype = r["knowledge_type"]
         title = r["title"]
-        print(f"- [{ktype}] {title} ({sl})")
+        summary = r.get("summary") or ""
+        line = f"- [{ktype}] {title} ({sl})"
+        if summary:
+            line += f"\n  {summary}"
+        print(line)
 else:
     print(f"# Project Knowledge: {project} ({total} records)")
     print()
@@ -1000,7 +1010,10 @@ else:
         label, desc = TYPE_LABELS[ktype]
         print(f"## {label} — {desc}")
         for r in recs:
-            print(f"- [{r['shortlink']}] {r['title']}")
+            line = f"- [{r['shortlink']}] {r['title']}"
+            if r.get("summary"):
+                line += f"\n  {r['summary']}"
+            print(line)
         print()
 
 print()
