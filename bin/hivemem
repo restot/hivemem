@@ -90,6 +90,26 @@ find_project_root() {
   die "Cannot find hivemem project root. Set HIVEMEM_PROJECT_ROOT or run from the hivemem directory."
 }
 
+# Set a key in Claude Code settings.json env block
+# Usage: set_claude_env <key> <value>
+set_claude_env() {
+  local key="$1" val="$2"
+  local claude_settings="$HOME/.claude/settings.json"
+  [[ -f "$claude_settings" ]] || return 1
+  need python3
+  python3 - "$claude_settings" "$key" "$val" <<'PYEOF'
+import json, sys
+settings_file, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(settings_file, "r") as f:
+    settings = json.load(f)
+settings.setdefault("env", {})
+settings["env"][key] = val
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+}
+
 # Fetch and trust the server's CA certificate
 # Usage: trust_server_cert <host:port>
 trust_server_cert() {
@@ -138,25 +158,8 @@ trust_server_cert() {
   fi
 
   # Set NODE_EXTRA_CA_CERTS in Claude Code settings so MCP client trusts the cert
-  local claude_settings="$HOME/.claude/settings.json"
-  if [[ -f "$claude_settings" ]]; then
-    need python3
-    python3 - "$claude_settings" "$ca_file" <<'PYEOF'
-import json, sys
-
-settings_file, ca_path = sys.argv[1], sys.argv[2]
-
-with open(settings_file, "r") as f:
-    settings = json.load(f)
-
-settings.setdefault("env", {})
-settings["env"]["NODE_EXTRA_CA_CERTS"] = ca_path
-
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-PYEOF
-    ok "NODE_EXTRA_CA_CERTS=$ca_file -> $claude_settings"
+  if set_claude_env "NODE_EXTRA_CA_CERTS" "$ca_file"; then
+    ok "NODE_EXTRA_CA_CERTS=$ca_file -> settings.json"
   else
     warn "Claude Code settings not found. Set NODE_EXTRA_CA_CERTS=$ca_file manually."
   fi
@@ -308,20 +311,8 @@ cmd_setup() {
     fi
 
     # Set NODE_EXTRA_CA_CERTS for Claude Code
-    local claude_settings="$HOME/.claude/settings.json"
-    if [[ -f "$claude_settings" ]]; then
-      python3 - "$claude_settings" "$hivemem_dir/ca.pem" <<'PYEOF'
-import json, sys
-settings_file, ca_path = sys.argv[1], sys.argv[2]
-with open(settings_file, "r") as f:
-    settings = json.load(f)
-settings.setdefault("env", {})
-settings["env"]["NODE_EXTRA_CA_CERTS"] = ca_path
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-PYEOF
-      ok "NODE_EXTRA_CA_CERTS -> $claude_settings"
+    if set_claude_env "NODE_EXTRA_CA_CERTS" "$hivemem_dir/ca.pem"; then
+      ok "NODE_EXTRA_CA_CERTS -> settings.json"
     fi
   fi
 
