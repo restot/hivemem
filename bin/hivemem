@@ -6,6 +6,7 @@
 #   setup              Bootstrap the hivemem server (TLS, auth, MCP config)
 #   onboard [PATH]     Onboard a project (inject CLAUDE.md, install skills)
 #   init               Install/update hivemem skills and configure MCP
+#   prime [PROJECT]    Output project knowledge for session priming
 #   migrate [PATH]     Migrate mulch records from a project into hivemem
 #   status             Check hivemem server health
 #   version            Show version and check for updates
@@ -108,10 +109,13 @@ trust_server_cert() {
     return 0
   fi
 
-  # Fetch the server certificate chain
+  # Fetch the CA certificate (last cert in chain = root)
   local cert_chain
   cert_chain="$(openssl s_client -connect "$hostport" -servername "${hostport%%:*}" \
-    </dev/null 2>/dev/null | openssl x509 -outform PEM 2>/dev/null || true)"
+    -showcerts </dev/null 2>/dev/null \
+    | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{print}' \
+    | awk 'BEGIN{cert=""} /BEGIN CERTIFICATE/{cert=""} {cert=cert $0 "\n"} /END CERTIFICATE/{last=cert} END{printf "%s", last}' \
+    || true)"
 
   if [[ -z "$cert_chain" ]]; then
     warn "Could not fetch certificate from $hostport"
@@ -456,7 +460,12 @@ cmd_init() {
   fi
 
   echo ""
-  trust_server_cert "$server_host"
+  trust_server_cert "$server_host" || true
+
+  # --- Lifecycle hooks ---
+  echo ""
+  info "Lifecycle hooks"
+  configure_hooks
 
   if $use_global; then
     echo ""
@@ -733,6 +742,165 @@ print(json.dumps(payload))
 }
 
 # =========================================================================
+# prime — Output project knowledge for session priming (used by hooks)
+# =========================================================================
+cmd_prime() {
+  local project="${1:-$(basename "$(pwd)")}"
+
+  need python3
+  need curl
+
+  # Resolve MCP URL and token from .mcp.json (project or global)
+  local mcp_url="" token=""
+  for cfg in ".mcp.json" "$GLOBAL_MCP_CONFIG"; do
+    if [[ -f "$cfg" ]] && grep -q '"hivemem"' "$cfg" 2>/dev/null; then
+      mcp_url="$(python3 -c "import json; print(json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
+      token="$(python3 -c "import json; h=json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('headers',{}); print(h.get('Authorization','').removeprefix('Bearer '))" 2>/dev/null || true)"
+      [[ -n "$mcp_url" ]] && break
+    fi
+  done
+
+  # Fall back to env/defaults
+  mcp_url="${mcp_url:-$MCP_URL}"
+  token="${token:-$(resolve_token)}"
+
+  # Fetch records
+  local payload
+  payload=$(python3 -c "
+import json
+print(json.dumps({
+    'jsonrpc': '2.0', 'id': 1,
+    'method': 'tools/call',
+    'params': {'name': 'hivemem_search_tool', 'arguments': {'project': '$project', 'limit': 50}}
+}))
+")
+
+  local auth_header=""
+  [[ -n "$token" ]] && auth_header="Authorization: Bearer $token"
+
+  local response
+  response="$(echo "$payload" | curl -sk -X POST "$mcp_url" \
+    -H "Content-Type: application/json" \
+    ${auth_header:+-H "$auth_header"} \
+    -d @- 2>/dev/null || true)"
+
+  if [[ -z "$response" ]]; then
+    echo "# Hivemem: could not reach server at $mcp_url"
+    echo ""
+    echo "Records will be available once the server is running."
+    exit 0
+  fi
+
+  # Format output
+  HIVEMEM_RESPONSE="$response" python3 - "$project" <<'PYEOF'
+import json, os, sys
+
+project = sys.argv[1]
+raw = os.environ.get("HIVEMEM_RESPONSE", "")
+
+try:
+    data = json.loads(json.loads(raw)["result"]["content"][0]["text"])
+except (json.JSONDecodeError, KeyError, IndexError):
+    print(f"# Hivemem: no data for {project}")
+    sys.exit(0)
+
+records = data.get("results", [])
+total = data.get("total", 0)
+
+if not records:
+    print(f"# Hivemem: no records for project '{project}'")
+    print("")
+    print("Record knowledge with: /hm-record")
+    sys.exit(0)
+
+# Group by type
+by_type = {}
+for r in records:
+    by_type.setdefault(r["knowledge_type"], []).append(r)
+
+type_labels = {
+    "convention": ("Conventions", "rules and standards to follow"),
+    "pattern": ("Patterns", "established approaches"),
+    "decision": ("Decisions", "past choices and rationale"),
+    "failure": ("Failures", "what went wrong and how it was fixed"),
+    "reference": ("References", "useful resources"),
+    "guide": ("Guides", "how-to knowledge"),
+}
+
+print(f"# Project Knowledge: {project} ({total} records)")
+print("")
+
+for ktype in ["convention", "pattern", "decision", "failure", "reference", "guide"]:
+    recs = by_type.get(ktype, [])
+    if not recs:
+        continue
+    label, desc = type_labels[ktype]
+    print(f"## {label} — {desc}")
+    for r in recs:
+        sl = r["shortlink"]
+        title = r["title"]
+        print(f"- [{sl}] {title}")
+    print("")
+
+# Session close protocol
+print("---")
+print("")
+print("# SESSION CLOSE PROTOCOL")
+print("CRITICAL: Before ending this session, you MUST:")
+print("1. Review your work for recordable learnings")
+print("2. Run `/hm-record` to capture conventions, patterns, decisions, failures")
+print("NEVER skip this. Unrecorded learnings are lost for the next session.")
+PYEOF
+}
+
+# =========================================================================
+# configure_hooks — Set up Claude Code SessionStart/PreCompact hooks
+# =========================================================================
+configure_hooks() {
+  local claude_settings="$HOME/.claude/settings.json"
+
+  [[ -f "$claude_settings" ]] || return 0
+
+  need python3
+
+  python3 - "$claude_settings" <<'PYEOF'
+import json, sys
+
+settings_file = sys.argv[1]
+
+with open(settings_file, "r") as f:
+    settings = json.load(f)
+
+hooks = settings.setdefault("hooks", {})
+
+hivemem_hook = {
+    "type": "command",
+    "command": "hivemem prime"
+}
+
+for event in ["SessionStart", "PreCompact"]:
+    event_hooks = hooks.setdefault(event, [])
+    # Check if hivemem hook already exists
+    already = False
+    for entry in event_hooks:
+        for h in entry.get("hooks", []):
+            if "hivemem prime" in h.get("command", ""):
+                already = True
+                break
+        if already:
+            break
+    if not already:
+        event_hooks.append({"hooks": [hivemem_hook]})
+
+with open(settings_file, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+PYEOF
+
+  ok "Hooks configured: SessionStart + PreCompact -> hivemem prime"
+}
+
+# =========================================================================
 # status — Check server health
 # =========================================================================
 cmd_status() {
@@ -845,9 +1013,10 @@ Commands:
     --no-install                    Skip skill installation
     --migrate-mulch                 Also migrate mulch records
     --global                        Write MCP config to ~/.mcp.json instead of project
-  init [OPTIONS]                  Install skills and configure MCP
+  init [OPTIONS]                  Install skills, configure MCP, set up hooks
     --global                        Write to ~/.mcp.json (for hosted instance)
     --project PATH                  Target project dir (default: cwd)
+  prime [PROJECT]                 Output project knowledge (auto-runs via hooks)
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   status                          Check server health and config
   version                         Show version, check for updates
@@ -895,6 +1064,7 @@ case "$cmd" in
   setup)    cmd_setup "$@" ;;
   onboard)  cmd_onboard "$@" ;;
   init)     cmd_init "$@" ;;
+  prime)    cmd_prime "$@" ;;
   migrate)  cmd_migrate "$@" ;;
   status)   cmd_status "$@" ;;
   version)  cmd_version "$@" ;;

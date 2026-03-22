@@ -8,7 +8,7 @@ Prime the current session with relevant hivemem knowledge.
 Arguments: $ARGUMENTS (project name, or "all" for cross-project knowledge)
 
 Steps:
-1. Parse the argument as the project name. If "all", omit the project filter.
+1. Parse the argument as the project name. If no argument given, use the current project directory name (basename of cwd). If "all", omit the project filter.
 2. Call `hivemem_search_tool` with:
    - `project`: the project name (omit if "all")
    - `limit`: 50
