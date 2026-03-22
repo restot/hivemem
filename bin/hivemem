@@ -1238,8 +1238,8 @@ Environment:
   HIVEMEM_SKILLS_PATH      Path within repo (default: skills)
 
 Install:
-  gh release download --repo restot/hivemem --pattern hivemem --dir ~/.claude/bin \
-    && chmod +x ~/.claude/bin/hivemem
+  gh release download --repo restot/hivemem --pattern hivemem --dir ~/.local/bin \
+    && chmod +x ~/.local/bin/hivemem
 
 Onboard a new project:
   cd ~/my-project
