@@ -18,11 +18,12 @@ VERSION="0.1.0"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
-# Defaults
+# Defaults — local-first
+LOCAL_MCP_URL="https://localhost:3000/mcp"
 GLOBAL_MCP_CONFIG="$HOME/.mcp.json"
 SKILLS_DST="$HOME/.claude/skills"
 OLD_COMMANDS_DST="$HOME/.claude/commands"
-MCP_URL="${HIVEMEM_URL:-https://localhost:3000/mcp}"
+MCP_URL="${HIVEMEM_URL:-$LOCAL_MCP_URL}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,24 +90,16 @@ find_project_root() {
 }
 
 # Configure MCP endpoint in .mcp.json
-# Usage: configure_mcp <token> [--project <path>]
-# Without --project: writes to ~/.mcp.json (global)
-# With --project: writes to <path>/.mcp.json (project-scoped)
+# Usage: configure_mcp <url> <token> [target_file]
+# target_file defaults to <cwd>/.mcp.json (per-project, local-first)
 configure_mcp() {
-  local token="${1:-}"
-  shift || true
-  local mcp_file="$GLOBAL_MCP_CONFIG"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --project) mcp_file="$2/.mcp.json"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
+  local url="${1:-$MCP_URL}"
+  local token="${2:-}"
+  local mcp_file="${3:-.mcp.json}"
 
   need python3
 
-  python3 - "$MCP_URL" "$token" "$mcp_file" <<'PYEOF'
+  python3 - "$url" "$token" "$mcp_file" <<'PYEOF'
 import json, sys
 
 mcp_url, token, mcp_file = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -219,17 +212,17 @@ cmd_setup() {
     ok "HIVEMEM_AUTH_TOKEN written to .env"
   fi
 
-  # --- 3. MCP config ---
+  # --- 3. MCP config (per-project, pointing to local instance) ---
   info "Claude Code MCP config"
-  configure_mcp "$token"
+  configure_mcp "$LOCAL_MCP_URL" "$token" "$project_root/.mcp.json"
 
   echo ""
   info "Setup complete"
   echo ""
-  echo "  MCP endpoint:  $MCP_URL"
+  echo "  MCP endpoint:  $LOCAL_MCP_URL"
   echo "  TLS certs:     $certs_dir/"
   echo "  Auth token:    .env (HIVEMEM_AUTH_TOKEN)"
-  echo "  Claude config: $GLOBAL_MCP_CONFIG"
+  echo "  MCP config:    $project_root/.mcp.json (local)"
   echo ""
   echo "  Next steps:"
   echo "    cd $project_root && docker compose up -d"
@@ -244,6 +237,8 @@ cmd_setup() {
 # =========================================================================
 # init — Install/update skills and configure MCP
 # =========================================================================
+# Default: per-project .mcp.json pointing to local instance
+# --global: ~/.mcp.json (for external/hosted instance)
 cmd_init() {
   need git
 
@@ -251,10 +246,12 @@ cmd_init() {
   local branch="${HIVEMEM_BRANCH:-main}"
   local skills_path="${HIVEMEM_SKILLS_PATH:-skills}"
 
-  local project_path=""
+  local use_global=false
+  local target_dir="."
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --project) project_path="$2"; shift 2 ;;
+      --global) use_global=true; shift ;;
+      --project) target_dir="$2"; shift 2 ;;
       *) die "init: unknown option $1" ;;
     esac
   done
@@ -314,11 +311,13 @@ cmd_init() {
   echo ""
   info "MCP config"
 
-  local target_mcp
-  if [[ -n "$project_path" ]]; then
-    target_mcp="$project_path/.mcp.json"
-  else
+  local target_mcp target_url
+  if $use_global; then
     target_mcp="$GLOBAL_MCP_CONFIG"
+    target_url="$MCP_URL"
+  else
+    target_mcp="$target_dir/.mcp.json"
+    target_url="$LOCAL_MCP_URL"
   fi
 
   # If already configured and no explicit env vars, preserve existing config
@@ -329,15 +328,27 @@ cmd_init() {
     local token
     token="$(resolve_token)"
     if [[ -n "$token" ]]; then
-      if [[ -n "$project_path" ]]; then
-        configure_mcp "$token" --project "$project_path"
-      else
-        configure_mcp "$token"
-      fi
+      configure_mcp "$target_url" "$token" "$target_mcp"
     else
-      warn "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup'."
-      warn "Skipping MCP config to avoid overwriting existing settings."
+      # No token — still write config for local (no auth needed in dev)
+      if $use_global; then
+        warn "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup'."
+        warn "Skipping global MCP config (needs auth for external instance)."
+      else
+        configure_mcp "$target_url" "" "$target_mcp"
+        warn "No auth token. Local dev mode (no auth). Set HIVEMEM_AUTH_TOKEN for production."
+      fi
     fi
+  fi
+
+  if $use_global; then
+    echo ""
+    echo "  Global config:  $GLOBAL_MCP_CONFIG -> $target_url"
+    echo "  Per-project configs take precedence over global."
+  else
+    echo ""
+    echo "  Project config: $target_mcp -> $target_url"
+    echo "  Use --global to configure ~/.mcp.json for a hosted instance."
   fi
 }
 
@@ -348,14 +359,14 @@ cmd_onboard() {
   local target_root="${1:-.}"
   local no_install=false
   local migrate=false
-  local project_mcp=false
+  local use_global=false
 
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-install) no_install=true; shift ;;
       --migrate-mulch) migrate=true; shift ;;
-      --project-mcp) project_mcp=true; shift ;;
+      --global) use_global=true; shift ;;
       *) die "onboard: unknown option $1" ;;
     esac
   done
@@ -368,10 +379,10 @@ cmd_onboard() {
 
   # --- Skills + MCP ---
   if ! $no_install; then
-    if $project_mcp; then
-      cmd_init --project "$target_root"
+    if $use_global; then
+      cmd_init --global
     else
-      cmd_init
+      cmd_init --project "$target_root"
     fi
     echo ""
   fi
@@ -632,16 +643,20 @@ cmd_status() {
 
   # Check MCP config
   local mcp_found=false
-  if [[ -f "$GLOBAL_MCP_CONFIG" ]] && grep -q '"hivemem"' "$GLOBAL_MCP_CONFIG" 2>/dev/null; then
-    ok "MCP configured globally ($GLOBAL_MCP_CONFIG)"
+  if [[ -f ".mcp.json" ]] && grep -q '"hivemem"' ".mcp.json" 2>/dev/null; then
+    local project_url
+    project_url="$(python3 -c "import json; print(json.load(open('.mcp.json')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
+    ok "MCP configured in project (.mcp.json) -> $project_url"
     mcp_found=true
   fi
-  if [[ -f ".mcp.json" ]] && grep -q '"hivemem"' ".mcp.json" 2>/dev/null; then
-    ok "MCP configured in project (.mcp.json)"
+  if [[ -f "$GLOBAL_MCP_CONFIG" ]] && grep -q '"hivemem"' "$GLOBAL_MCP_CONFIG" 2>/dev/null; then
+    local global_url
+    global_url="$(python3 -c "import json; print(json.load(open('$GLOBAL_MCP_CONFIG')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
+    ok "MCP configured globally ($GLOBAL_MCP_CONFIG) -> $global_url"
     mcp_found=true
   fi
   if ! $mcp_found; then
-    warn "MCP not configured (run 'hivemem setup')"
+    warn "MCP not configured (run 'hivemem init')"
   fi
 }
 
@@ -708,17 +723,24 @@ hivemem — Portable CLI for hivemem knowledge store
 Usage: hivemem <command> [args]
 
 Commands:
-  setup [--hostname NAME]         Bootstrap server (TLS, auth, MCP config)
+  setup [--hostname NAME]         Bootstrap local server (TLS, auth, MCP config)
   onboard [PATH] [OPTIONS]        Onboard a project
     --no-install                    Skip skill installation
     --migrate-mulch                 Also migrate mulch records
-    --project-mcp                   Write .mcp.json in project instead of global
-  init [--project PATH]           Install skills and configure MCP
+    --global                        Write MCP config to ~/.mcp.json instead of project
+  init [OPTIONS]                  Install skills and configure MCP
+    --global                        Write to ~/.mcp.json (for hosted instance)
+    --project PATH                  Target project dir (default: cwd)
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   status                          Check server health and config
   version                         Show version, check for updates
   update                          Self-update from GitHub releases
   help                            Show this help
+
+MCP Config Precedence:
+  Per-project .mcp.json takes precedence over global ~/.mcp.json.
+  Default: per-project .mcp.json -> localhost (local-first)
+  --global: ~/.mcp.json -> hosted instance (set HIVEMEM_URL)
 
 Environment:
   HIVEMEM_URL              MCP endpoint (default: https://localhost:3000/mcp)
@@ -736,6 +758,13 @@ Onboard a new project:
   cd ~/my-project
   hivemem onboard .
   # or: hivemem onboard . --migrate-mulch
+
+Typical setup:
+  # Local dev (default — per-project .mcp.json -> localhost:3000)
+  hivemem setup && docker compose up -d && hivemem onboard ~/my-project
+
+  # Hosted (global ~/.mcp.json -> external server)
+  HIVEMEM_URL=https://server:3100/mcp hivemem init --global
 EOF
 }
 
