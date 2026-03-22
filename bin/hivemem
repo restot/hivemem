@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
