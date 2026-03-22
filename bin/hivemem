@@ -1314,12 +1314,12 @@ print(json.dumps({
 }))
 ")
 
-  auth_header=""
-  [[ -n "$token" ]] && auth_header="-H \"Authorization: Bearer $token\""
+  local auth_header=""
+  [[ -n "$token" ]] && auth_header="Authorization: Bearer $token"
 
   response="$(echo "$payload" | curl -sk -X POST "$mcp_url" \
     -H "Content-Type: application/json" \
-    ${auth_header:+-H "Authorization: Bearer $token"} \
+    ${auth_header:+-H "$auth_header"} \
     -d @- 2>/dev/null || true)"
 
   if [[ -z "$response" ]]; then
