@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
@@ -765,7 +765,7 @@ print(json.dumps(payload))
 # =========================================================================
 cmd_prime() {
   local project="" format="markdown" mode="compact" context=false budget="4000"
-  local -a filter_files=()
+  local -a filter_files=() domains=() exclude_domains=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -774,6 +774,8 @@ cmd_prime() {
       --compact)   mode="compact"; shift ;;
       --context)   context=true; shift ;;
       --files)     shift; while [[ $# -gt 0 ]] && [[ "$1" != --* ]]; do filter_files+=("$1"); shift; done ;;
+      --domain)    shift; while [[ $# -gt 0 ]] && [[ "$1" != --* ]]; do domains+=("$1"); shift; done ;;
+      --exclude-domain) shift; while [[ $# -gt 0 ]] && [[ "$1" != --* ]]; do exclude_domains+=("$1"); shift; done ;;
       --json)      format="json"; shift ;;
       --xml)       format="xml"; shift ;;
       --plain)     format="plain"; shift ;;
@@ -868,13 +870,19 @@ print(json.dumps({
   fi
 
   # Format output
-  HIVEMEM_RESPONSE="$response" python3 - "$project" "$format" "$mode" "$budget" <<'PYEOF'
+  local domain_csv="" exclude_domain_csv=""
+  [[ ${#domains[@]} -gt 0 ]] && domain_csv="$(IFS=,; echo "${domains[*]}")"
+  [[ ${#exclude_domains[@]} -gt 0 ]] && exclude_domain_csv="$(IFS=,; echo "${exclude_domains[*]}")"
+
+  HIVEMEM_RESPONSE="$response" python3 - "$project" "$format" "$mode" "$budget" "$domain_csv" "$exclude_domain_csv" <<'PYEOF'
 import json, math, os, sys
 
 project = sys.argv[1]
 fmt = sys.argv[2]
 mode = sys.argv[3]
 budget = int(sys.argv[4]) if len(sys.argv) > 4 else 4000
+include_domains = [d for d in (sys.argv[5] if len(sys.argv) > 5 else "").split(",") if d]
+exclude_domains = [d for d in (sys.argv[6] if len(sys.argv) > 6 else "").split(",") if d]
 raw = os.environ.get("HIVEMEM_RESPONSE", "")
 
 TYPE_ORDER = ["convention", "decision", "pattern", "guide", "failure", "reference"]
@@ -1007,7 +1015,18 @@ except (json.JSONDecodeError, KeyError, IndexError):
     render_empty(project, fmt)
 
 records = sort_records(data.get("results", []))
-total = data.get("total", 0)
+
+# Apply domain filtering
+def record_domain(r):
+    tags = r.get("tags") or []
+    return tags[0] if tags else "General"
+
+if include_domains:
+    records = [r for r in records if record_domain(r) in include_domains]
+if exclude_domains:
+    records = [r for r in records if record_domain(r) not in exclude_domains]
+
+total = len(records)
 
 # Apply token budget (0 = no limit, json ignores budget)
 dropped = 0
@@ -1596,6 +1615,8 @@ Commands:
     --format <markdown|xml|plain|json>  Output format (default: markdown)
     --context                       Filter to records relevant to git changes
     --files <paths...>              Filter to records relevant to specific files
+    --domain <domains...>           Include only these domains (by first tag)
+    --exclude-domain <domains...>   Exclude these domains
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   validate [--quiet]              Check record health (pre-commit hook)
   status                          Check server health and config
