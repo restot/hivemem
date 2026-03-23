@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
@@ -289,9 +289,9 @@ cmd_setup() {
     ok "HIVEMEM_AUTH_TOKEN written to .env"
   fi
 
-  # --- 3. MCP config (per-project, pointing to local instance) ---
+  # --- 3. MCP config (global, so all projects can reach the server) ---
   info "Claude Code MCP config"
-  configure_mcp "$LOCAL_MCP_URL" "$token" "$project_root/.mcp.json"
+  configure_mcp "$LOCAL_MCP_URL" "$token" "$GLOBAL_MCP_CONFIG"
 
   # --- 4. Trust CA cert ---
   # Copy to ~/.hivemem/ca.pem and trust on macOS + set NODE_EXTRA_CA_CERTS
@@ -324,7 +324,7 @@ cmd_setup() {
   echo "  TLS certs:     $certs_dir/"
   echo "  CA cert:       $hivemem_dir/ca.pem (trusted)"
   echo "  Auth token:    .env (HIVEMEM_AUTH_TOKEN)"
-  echo "  MCP config:    $project_root/.mcp.json (local)"
+  echo "  MCP config:    $GLOBAL_MCP_CONFIG (global)"
   echo ""
   echo "  Next steps:"
   echo "    cd $project_root && docker compose up -d"
