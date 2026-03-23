@@ -31,7 +31,7 @@ hivemem migrate .             # execute
 ```
 ┌─────────────────┐     MCP/HTTP      ┌──────────────┐
 │  Claude Code    │ ◄──────────────► │  Rails API   │
-│  (skills/tools) │    JSON-RPC       │  port 3000   │
+│  (skills/tools) │    JSON-RPC       │  port 3055   │
 └─────────────────┘                   └──────┬───────┘
                                              │
                                       ┌──────▼───────┐
@@ -96,7 +96,7 @@ Installed to `~/.claude/skills/` by `hivemem init`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HIVEMEM_URL` | `https://localhost:3000/mcp` | MCP endpoint |
+| `HIVEMEM_URL` | `https://localhost:3055/mcp` | MCP endpoint |
 | `HIVEMEM_AUTH_TOKEN` | (from `.env`) | Bearer token |
 | `HIVEMEM_PROJECT_ROOT` | (auto-detected) | Server project root |
 | `DB_HOST` | `db` | PostgreSQL host |
@@ -110,7 +110,7 @@ Installed to `~/.claude/skills/` by `hivemem init`:
 ```bash
 docker compose up -d
 docker compose exec web bin/rails db:migrate
-curl -s http://localhost:3000/health
+curl -s http://localhost:3055/health
 ```
 
 ## Mulch Migration

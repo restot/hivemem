@@ -21,7 +21,7 @@ GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
 # Defaults — local-first
-LOCAL_MCP_URL="https://localhost:3000/mcp"
+LOCAL_MCP_URL="https://localhost:3055/mcp"
 GLOBAL_MCP_CONFIG="$HOME/.mcp.json"
 SKILLS_DST="$HOME/.claude/skills"
 OLD_COMMANDS_DST="$HOME/.claude/commands"
@@ -391,7 +391,7 @@ cmd_install_skills() {
   else
     echo "  Installed/updated $installed skill(s)."
   fi
-  [[ $cleaned -gt 0 ]] && echo "  Cleaned up $cleaned old command(s)."
+  [[ $cleaned -gt 0 ]] && echo "  Cleaned up $cleaned old command(s)." || true
 }
 
 # =========================================================================
@@ -1630,7 +1630,7 @@ MCP Config Precedence:
   --global: ~/.mcp.json -> hosted instance (set HIVEMEM_URL)
 
 Environment:
-  HIVEMEM_URL              MCP endpoint (default: https://localhost:3000/mcp)
+  HIVEMEM_URL              MCP endpoint (default: https://localhost:3055/mcp)
   HIVEMEM_AUTH_TOKEN       Auth token (overrides .env)
   HIVEMEM_PROJECT_ROOT     Server project root (auto-detected)
   HIVEMEM_REPO             Git repo for skills (default: restot/hivemem)
@@ -1647,7 +1647,7 @@ Onboard a new project:
   # or: hivemem onboard . --migrate-mulch
 
 Typical setup:
-  # Local dev (default — per-project .mcp.json -> localhost:3000)
+  # Local dev (default — per-project .mcp.json -> localhost:3055)
   hivemem setup && docker compose up -d && hivemem onboard ~/my-project
 
   # Hosted (global ~/.mcp.json -> external server)

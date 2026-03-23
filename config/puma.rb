@@ -28,15 +28,15 @@
 threads_count = ENV.fetch("RAILS_MAX_THREADS", 3)
 threads threads_count, threads_count
 
-# Specifies the `port` that Puma will listen on to receive requests; default is 3000.
+# Specifies the `port` that Puma will listen on to receive requests; default is 3055.
 # When TLS cert files are present, bind with SSL; otherwise plain HTTP.
 if ENV["SSL_CERT_FILE"] && ENV["SSL_KEY_FILE"] && File.exist?(ENV["SSL_CERT_FILE"])
-  ssl_bind "0.0.0.0", ENV.fetch("PORT", 3000),
+  ssl_bind "0.0.0.0", ENV.fetch("PORT", 3055),
     cert: ENV["SSL_CERT_FILE"],
     key: ENV["SSL_KEY_FILE"],
     verify_mode: "none"
 else
-  port ENV.fetch("PORT", 3000)
+  port ENV.fetch("PORT", 3055)
 end
 
 # Allow puma to be restarted by `bin/rails restart` command.

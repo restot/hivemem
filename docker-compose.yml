@@ -18,7 +18,7 @@ services:
     build: .
     command: bundle exec puma -C config/puma.rb
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3055}:3055"
     volumes:
       - ./certs:/rails/certs:ro
     environment:

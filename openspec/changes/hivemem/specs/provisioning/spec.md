@@ -56,7 +56,7 @@ The Rails MCP server container SHALL expose its HTTP port to the host so that cl
 
 #### Scenario: Port mapped to host
 - **WHEN** the system starts via `docker compose up`
-- **THEN** port 3000 inside the Rails container SHALL be mapped to port 3000 on the host, and HTTP requests to `http://localhost:3000` SHALL reach the Rails server
+- **THEN** port 3055 inside the Rails container SHALL be mapped to port 3055 on the host, and HTTP requests to `http://localhost:3055` SHALL reach the Rails server
 
 ### Requirement: Health check endpoint
 The Rails application SHALL expose a health endpoint that Docker can use for container health checks.

@@ -73,5 +73,5 @@ COPY --chown=rails:rails --from=build /rails /rails
 ENTRYPOINT ["/rails/bin/docker-entrypoint"]
 
 # Start server
-EXPOSE 3000
+EXPOSE 3055
 CMD ["./bin/rails", "server", "-b", "0.0.0.0"]
