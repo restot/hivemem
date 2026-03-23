@@ -5,8 +5,7 @@ Persistent knowledge store for AI coding agents. Mulch-compatible schema, expose
 ## Install CLI
 
 ```bash
-curl -fsSL https://github.com/restot/hivemem/releases/latest/download/hivemem \
-  -o ~/.claude/bin/hivemem && chmod +x ~/.claude/bin/hivemem
+gh release download --repo restot/hivemem --pattern hivemem --dir ~/.local/bin && chmod +x ~/.local/bin/hivemem
 ```
 
 ## Quick Start
@@ -74,14 +73,16 @@ Mulch-compatible. All record types share a common schema.
 |---|---|
 | `hivemem setup` | Bootstrap server (TLS certs, auth token, MCP config) |
 | `hivemem onboard [PATH]` | Onboard a project (install skills + CLAUDE.md) |
-| `hivemem install` | Install/update skills + MCP config |
+| `hivemem init` | Install skills, configure MCP, set up hooks |
+| `hivemem prime [PROJECT]` | Output project knowledge (auto-runs via hooks) |
 | `hivemem migrate [PATH]` | Import mulch records into hivemem |
+| `hivemem validate` | Check record health (pre-commit hook) |
 | `hivemem status` | Check server health |
 | `hivemem update` | Self-update from GitHub releases |
 
 ## Skills
 
-Installed to `~/.claude/skills/` by `hivemem install`:
+Installed to `~/.claude/skills/` by `hivemem init`:
 
 | Skill | Description |
 |---|---|
