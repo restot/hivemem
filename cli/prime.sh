@@ -170,39 +170,9 @@ def budget_summary(dropped, fmt):
 def render_rules():
     """Render Rules section for full mode."""
     return """## Rules
-- Before starting work, check existing knowledge with `/hm-search <query>` to avoid rediscovering known patterns.
-- Record new learnings as you work — conventions discovered, patterns applied, decisions made, failures encountered.
-- Use `/hm-record` to save knowledge. Include evidence links when possible.
-- Use `/hm-prime --files <paths>` for targeted priming when working on specific files.
-- Do NOT store project knowledge in other tools (mulch, notes, etc.) — use hivemem exclusively.
-"""
-
-def render_recording_examples():
-    """Render Recording New Learnings section for full mode."""
-    return """## Recording New Learnings
-
-Examples:
-```
-/hm-record convention always use shortlinks as primary identifier
-/hm-record pattern retry with exponential backoff on 429 errors
-/hm-record decision chose ParadeDB over pg_trgm for BM25 search
-/hm-record failure migration broke because column had NOT NULL without default
-/hm-record reference deploy docs at https://internal.wiki/deploy
-/hm-record guide how to set up local dev environment
-```
-
-**Required fields by type:**
-
-| Type | Required |
-|------|----------|
-| `convention` | description |
-| `pattern` | name, description |
-| `decision` | title, rationale |
-| `failure` | description, resolution |
-| `reference` | name, description |
-| `guide` | name, description |
-
-Link evidence: `--evidence-commit <sha>`, `--evidence-bead <id>`
+- Check existing knowledge with `/hm-search <query>` before starting work.
+- Record learnings as you work with `/hm-record`.
+- Use `/hm-prime --files <paths>` for targeted priming on specific files.
 """
 
 TYPE_LABELS = {
@@ -233,8 +203,6 @@ def render_empty(project, fmt):
 def render_markdown_header(project, total):
     """Render the shared markdown header block."""
     print(f"# Project Knowledge: {project} ({total} records)")
-    print()
-    print("> **Hivemem** is the memory system for this project. To record learnings, run `/hm-record`. Do NOT use mulch.")
     print()
 
 try:
@@ -298,8 +266,10 @@ if fmt == "xml":
         print(budget_summary(dropped, "xml"))
     print('</expertise>')
     print('<session_close_protocol priority="critical">')
-    print('  <instruction>Before ending this session, review work for recordable learnings</instruction>')
-    print('  <step>Run /hm-record to capture conventions, patterns, decisions, failures</step>')
+    print('  <checklist>')
+    print('    <step>Review work for recordable learnings</step>')
+    print('    <step>/hm-record to capture conventions, patterns, decisions, failures</step>')
+    print('  </checklist>')
     print('  <warning>NEVER skip this. Unrecorded learnings are lost for the next session.</warning>')
     print('</session_close_protocol>')
     sys.exit(0)
@@ -308,18 +278,28 @@ if fmt == "xml":
 if fmt == "plain":
     print(f"Project Knowledge: {project} ({total} records)")
     print("=" * 50)
-    print("Hivemem is the memory system for this project. To record learnings, run /hm-record. Do NOT use mulch.")
     print()
     if mode == "compact":
-        for r in records:
-            line = f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})"
-            if r.get("summary"):
-                line += f"\n    {r['summary']}"
-            print(line)
+        domains = group_by_domain(records)
+        if len(domains) <= 1:
+            for r in records:
+                line = f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})"
+                if r.get("summary"):
+                    line += f"\n    {r['summary']}"
+                print(line)
+        else:
+            for domain, domain_recs in domains.items():
+                print(f"[{domain}] {len(domain_recs)} records")
+                for r in domain_recs:
+                    line = f"  [{r['knowledge_type']}] {r['title']} ({r['shortlink']})"
+                    if r.get("summary"):
+                        line += f"\n    {r['summary']}"
+                    print(line)
+                print()
     else:
         for domain, domain_recs in group_by_domain(records).items():
-            print(f"{domain}")
-            print("-" * len(domain))
+            print(f"[{domain}] {len(domain_recs)} records")
+            print("-" * (len(domain) + 15))
             domain_by_type = {}
             for r in domain_recs:
                 domain_by_type.setdefault(r["knowledge_type"], []).append(r)
@@ -340,12 +320,12 @@ if fmt == "plain":
     print()
     print("Quick Reference")
     print("-" * 30)
-    print("  /hm-record          Record knowledge from this session")
-    print("  /hm-search <query>  Search knowledge records")
-    print("  /hm-prime           Reload project knowledge")
-    print("  /hm-read <id>       Read full record details")
+    print("  /hm-search <query>    Find relevant records")
+    print("  /hm-prime --context   Load records for changed files")
+    print("  /hm-record <type> ... Record a learning")
+    print("  /hm-read <shortlink>  Read full record details")
     print()
-    print("=== CRITICAL SESSION CLOSE PROTOCOL ===")
+    print("=== SESSION CLOSE PROTOCOL (CRITICAL) ===")
     print("Before ending this session, you MUST:")
     print("[ ] 1. Review your work for recordable learnings")
     print("[ ] 2. Run /hm-record to capture conventions, patterns, decisions, failures")
@@ -353,22 +333,34 @@ if fmt == "plain":
     sys.exit(0)
 
 # --- Markdown format ---
+def render_compact_record(r):
+    sl = r["shortlink"]
+    ktype = r["knowledge_type"]
+    title = r["title"]
+    summary = r.get("summary") or ""
+    line = f"- [{ktype}] {title} ({sl})"
+    if summary:
+        line += f"\n  {summary}"
+    return line
+
 if mode == "compact":
     render_markdown_header(project, total)
-    for r in records:
-        sl = r["shortlink"]
-        ktype = r["knowledge_type"]
-        title = r["title"]
-        summary = r.get("summary") or ""
-        line = f"- [{ktype}] {title} ({sl})"
-        if summary:
-            line += f"\n  {summary}"
-        print(line)
+    domains = group_by_domain(records)
+    if len(domains) <= 1:
+        # Single domain or no tags — flat list
+        for r in records:
+            print(render_compact_record(r))
+    else:
+        for domain, domain_recs in domains.items():
+            print(f"## {domain} ({len(domain_recs)} records)")
+            for r in domain_recs:
+                print(render_compact_record(r))
+            print()
 else:
     render_markdown_header(project, total)
     print(render_rules())
     for domain, domain_recs in group_by_domain(records).items():
-        print(f"## {domain}")
+        print(f"## {domain} ({len(domain_recs)} records)")
         domain_by_type = {}
         for r in domain_recs:
             domain_by_type.setdefault(r["knowledge_type"], []).append(r)
@@ -385,19 +377,16 @@ else:
                 print(line)
         print()
 
-    print(render_recording_examples())
-
 if dropped > 0:
     print(budget_summary(dropped, "markdown"))
 
 print()
 print("## Quick Reference")
-print("- `/hm-record` — record knowledge from this session")
-print("- `/hm-search <query>` — search knowledge records")
-print("- `/hm-prime` — reload project knowledge")
+print("- `/hm-search <query>` — find relevant records before starting work")
+print("- `/hm-prime --files <paths>` — load records for specific files")
+print("- `/hm-prime --context` — load records for git-changed files")
+print("- `/hm-record <type> <description>` — record a learning")
 print("- `/hm-read <shortlink>` — read full record details")
-print()
-print("---")
 print()
 print("# CRITICAL SESSION CLOSE PROTOCOL")
 print("**CRITICAL**: Before ending this session, you MUST run this checklist:")
