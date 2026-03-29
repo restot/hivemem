@@ -30,3 +30,7 @@
 /tmp/storage/*
 !/tmp/storage/.keep
 .change-review/
+
+# Agent tools (local, not project code)
+/.claude/
+/mulch/

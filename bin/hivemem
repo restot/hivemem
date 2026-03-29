@@ -3,11 +3,10 @@
 # Usage: hivemem <command> [args]
 #
 # Commands:
-#   setup              Bootstrap the hivemem server (TLS, auth, MCP config)
-#   onboard [PATH]     Onboard a project (inject CLAUDE.md, install skills)
-#   init               Install/update hivemem skills and configure MCP
-#   prime [PROJECT] [OPTIONS]  Output project knowledge for session priming
-#   migrate [PATH]     Migrate mulch records from a project into hivemem
+#   setup              Bootstrap the hivemem server (TLS, auth)
+#   init [OPTIONS]     Install skills, hooks, configure settings
+#   prime [PROJECT]    Output project knowledge for session priming
+#   migrate [PATH]     Migrate mulch records into hivemem
 #   validate           Check record health (pre-commit hook)
 #   status             Check hivemem server health
 #   version            Show version and check for updates
@@ -16,16 +15,17 @@
 
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.5.0"
 GITHUB_REPO="restot/hivemem"
 GITHUB_URL="https://github.com/$GITHUB_REPO"
 
-# Defaults — local-first
-LOCAL_MCP_URL="https://localhost:3055/mcp"
-GLOBAL_MCP_CONFIG="$HOME/.mcp.json"
+DEFAULT_SERVER_URL="https://localhost:3055"
 SKILLS_DST="$HOME/.claude/skills"
 OLD_COMMANDS_DST="$HOME/.claude/commands"
-MCP_URL="${HIVEMEM_URL:-$LOCAL_MCP_URL}"
+
+# Source repo paths (relative to this script when run from repo checkout)
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_PATH")"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,20 +40,91 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "Required: $1"
 }
 
-# Read the auth token from .env or HIVEMEM_AUTH_TOKEN env var
-resolve_token() {
-  if [[ -n "${HIVEMEM_AUTH_TOKEN:-}" ]]; then
-    echo "$HIVEMEM_AUTH_TOKEN"
-    return
+# Read a key from a hivemem config file
+# Usage: _read_config <file> <key>
+_read_config() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 1
+  grep -E "^${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+# Read URL or token from a legacy .mcp.json file
+# Usage: _read_legacy_mcp <file> <field>  (field: url or token)
+_read_legacy_mcp() {
+  local file="$1" field="$2"
+  [[ -f "$file" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$file" "$field" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    hm = cfg.get("mcpServers", {}).get("hivemem", {})
+    if sys.argv[2] == "url":
+        url = hm.get("url", "")
+        url = url.removesuffix("/mcp").rstrip("/")
+        print(url)
+    elif sys.argv[2] == "token":
+        auth = hm.get("headers", {}).get("Authorization", "")
+        print(auth.removeprefix("Bearer "))
+except Exception:
+    pass
+PYEOF
+}
+
+# Resolve the hivemem server URL and auth token
+# Sets: SERVER_URL, AUTH_TOKEN
+# Precedence: env > project .hivemem/config > global ~/.hivemem/config
+#             > legacy .mcp.json > legacy ~/.mcp.json > defaults
+resolve_server() {
+  # Server URL
+  SERVER_URL="${HIVEMEM_URL:-}"
+  if [[ -z "$SERVER_URL" ]]; then
+    SERVER_URL="$(_read_config ".hivemem/config" "server_url" 2>/dev/null || true)"
   fi
-  # Try to find .env in known locations
+  if [[ -z "$SERVER_URL" ]]; then
+    SERVER_URL="$(_read_config "$HOME/.hivemem/config" "server_url" 2>/dev/null || true)"
+  fi
+  # Legacy .mcp.json fallback
+  if [[ -z "$SERVER_URL" ]]; then
+    SERVER_URL="$(_read_legacy_mcp ".mcp.json" "url" 2>/dev/null || true)"
+  fi
+  if [[ -z "$SERVER_URL" ]]; then
+    SERVER_URL="$(_read_legacy_mcp "$HOME/.mcp.json" "url" 2>/dev/null || true)"
+  fi
+  SERVER_URL="${SERVER_URL:-$DEFAULT_SERVER_URL}"
+  # Strip trailing /mcp if present (legacy URLs)
+  SERVER_URL="${SERVER_URL%/mcp}"
+  SERVER_URL="${SERVER_URL%/}"
+
+  # Auth token
+  AUTH_TOKEN="${HIVEMEM_AUTH_TOKEN:-}"
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    AUTH_TOKEN="$(_read_config ".hivemem/config" "auth_token" 2>/dev/null || true)"
+  fi
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    AUTH_TOKEN="$(_read_config "$HOME/.hivemem/config" "auth_token" 2>/dev/null || true)"
+  fi
+  # Legacy .mcp.json fallback
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    AUTH_TOKEN="$(_read_legacy_mcp ".mcp.json" "token" 2>/dev/null || true)"
+  fi
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    AUTH_TOKEN="$(_read_legacy_mcp "$HOME/.mcp.json" "token" 2>/dev/null || true)"
+  fi
+  if [[ -z "$AUTH_TOKEN" ]]; then
+    AUTH_TOKEN="$(resolve_token 2>/dev/null || true)"
+  fi
+}
+
+# Read the auth token from .env (legacy fallback)
+resolve_token() {
   local env_file=""
   if [[ -n "${HIVEMEM_PROJECT_ROOT:-}" && -f "$HIVEMEM_PROJECT_ROOT/.env" ]]; then
     env_file="$HIVEMEM_PROJECT_ROOT/.env"
   elif [[ -f "$HOME/.hivemem/.env" ]]; then
     env_file="$HOME/.hivemem/.env"
   else
-    # Auto-detect project root
     local root
     root="$(find_project_root 2>/dev/null || true)"
     if [[ -n "$root" && -f "$root/.env" ]]; then
@@ -71,7 +142,6 @@ find_project_root() {
     echo "$HIVEMEM_PROJECT_ROOT"
     return
   fi
-  # Check common locations
   local candidates=(
     "$HOME/Documents/projects/hivemem"
     "$HOME/projects/hivemem"
@@ -83,7 +153,6 @@ find_project_root() {
       return
     fi
   done
-  # Fall back to current dir if it looks right
   if [[ -f "./docker-compose.yml" ]] && grep -q hivemem "./docker-compose.yml" 2>/dev/null; then
     pwd
     return
@@ -91,28 +160,9 @@ find_project_root() {
   die "Cannot find hivemem project root. Set HIVEMEM_PROJECT_ROOT or run from the hivemem directory."
 }
 
-# Set a key in Claude Code settings.json env block
-# Usage: set_claude_env <key> <value>
-set_claude_env() {
-  local key="$1" val="$2"
-  local claude_settings="$HOME/.claude/settings.json"
-  [[ -f "$claude_settings" ]] || return 1
-  need python3
-  python3 - "$claude_settings" "$key" "$val" <<'PYEOF'
-import json, sys
-settings_file, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(settings_file, "r") as f:
-    settings = json.load(f)
-settings.setdefault("env", {})
-settings["env"][key] = val
-with open(settings_file, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-PYEOF
-}
-
-# Fetch and trust the server's CA certificate
-# Usage: trust_server_cert <host:port>
+# =========================================================================
+# trust_server_cert — Fetch and trust the server's CA certificate
+# =========================================================================
 trust_server_cert() {
   local hostport="${1:?Usage: trust_server_cert host:port}"
   local cert_dir="$HOME/.hivemem"
@@ -124,13 +174,11 @@ trust_server_cert() {
 
   info "TLS certificate setup"
 
-  # Check if TLS already works
   if curl -s --connect-timeout 3 "https://$hostport/health" >/dev/null 2>&1; then
     skip "TLS already trusted for $hostport"
     return 0
   fi
 
-  # Fetch the CA certificate (last cert in chain = root)
   local cert_chain
   cert_chain="$(openssl s_client -connect "$hostport" -servername "${hostport%%:*}" \
     -showcerts </dev/null 2>/dev/null \
@@ -143,11 +191,9 @@ trust_server_cert() {
     return 1
   fi
 
-  # Save CA cert
   echo "$cert_chain" > "$ca_file"
   ok "CA cert saved -> $ca_file"
 
-  # Trust on macOS system keychain
   if [[ "$(uname)" == "Darwin" ]]; then
     info "Trusting CA cert on macOS (requires sudo)"
     if sudo security add-trusted-cert -d -r trustRoot \
@@ -157,49 +203,6 @@ trust_server_cert() {
       warn "Could not add to system keychain. You may need to trust manually."
     fi
   fi
-
-  # Set NODE_EXTRA_CA_CERTS in Claude Code settings so MCP client trusts the cert
-  if set_claude_env "NODE_EXTRA_CA_CERTS" "$ca_file"; then
-    ok "NODE_EXTRA_CA_CERTS=$ca_file -> settings.json"
-  else
-    warn "Claude Code settings not found. Set NODE_EXTRA_CA_CERTS=$ca_file manually."
-  fi
-}
-
-# Configure MCP endpoint in .mcp.json
-# Usage: configure_mcp <url> <token> [target_file]
-# target_file defaults to <cwd>/.mcp.json (per-project, local-first)
-configure_mcp() {
-  local url="${1:-$MCP_URL}"
-  local token="${2:-}"
-  local mcp_file="${3:-.mcp.json}"
-
-  need python3
-
-  python3 - "$url" "$token" "$mcp_file" <<'PYEOF'
-import json, sys
-
-mcp_url, token, mcp_file = sys.argv[1], sys.argv[2], sys.argv[3]
-
-entry = {"type": "http", "url": mcp_url}
-if token:
-    entry["headers"] = {"Authorization": f"Bearer {token}"}
-
-try:
-    with open(mcp_file, "r") as f:
-        config = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    config = {}
-
-config.setdefault("mcpServers", {})
-config["mcpServers"]["hivemem"] = entry
-
-with open(mcp_file, "w") as f:
-    json.dump(config, f, indent=2)
-    f.write("\n")
-PYEOF
-
-  ok "MCP config -> $mcp_file"
 }
 
 # =========================================================================
@@ -289,72 +292,88 @@ cmd_setup() {
     ok "HIVEMEM_AUTH_TOKEN written to .env"
   fi
 
-  # --- 3. MCP config (global, so all projects can reach the server) ---
-  info "Claude Code MCP config"
-  configure_mcp "$LOCAL_MCP_URL" "$token" "$GLOBAL_MCP_CONFIG"
+  # --- 3. Global config ---
+  info "Hivemem config"
+  local config_dir="$HOME/.hivemem"
+  mkdir -p "$config_dir"
+
+  local config_content
+  config_content="$(printf 'server_url=%s\nauth_token=%s\n' "$DEFAULT_SERVER_URL" "$token")"
+  if [[ -f "$config_dir/config" ]] && [[ "$(cat "$config_dir/config")" == "$config_content" ]]; then
+    skip "Config unchanged"
+  else
+    printf '%s\n' "$config_content" > "$config_dir/config"
+    ok "Config -> $config_dir/config"
+  fi
 
   # --- 4. Trust CA cert ---
-  # Copy to ~/.hivemem/ca.pem and trust on macOS + set NODE_EXTRA_CA_CERTS
-  local hivemem_dir="$HOME/.hivemem"
-  mkdir -p "$hivemem_dir"
   if [[ -f "$certs_dir/hivemem-ca.pem" ]]; then
-    cp "$certs_dir/hivemem-ca.pem" "$hivemem_dir/ca.pem"
-    ok "CA cert -> $hivemem_dir/ca.pem"
+    cp "$certs_dir/hivemem-ca.pem" "$config_dir/ca.pem"
+    ok "CA cert -> $config_dir/ca.pem"
 
     if [[ "$(uname)" == "Darwin" ]]; then
       info "Trusting CA cert on macOS (requires sudo)"
       if sudo security add-trusted-cert -d -r trustRoot \
-        -k /Library/Keychains/System.keychain "$hivemem_dir/ca.pem" 2>/dev/null; then
+        -k /Library/Keychains/System.keychain "$config_dir/ca.pem" 2>/dev/null; then
         ok "CA cert trusted in system keychain"
       else
         warn "Could not add to system keychain"
       fi
-    fi
-
-    # Set NODE_EXTRA_CA_CERTS for Claude Code
-    if set_claude_env "NODE_EXTRA_CA_CERTS" "$hivemem_dir/ca.pem"; then
-      ok "NODE_EXTRA_CA_CERTS -> settings.json"
     fi
   fi
 
   echo ""
   info "Setup complete"
   echo ""
-  echo "  MCP endpoint:  $LOCAL_MCP_URL"
-  echo "  TLS certs:     $certs_dir/"
-  echo "  CA cert:       $hivemem_dir/ca.pem (trusted)"
-  echo "  Auth token:    .env (HIVEMEM_AUTH_TOKEN)"
-  echo "  MCP config:    $GLOBAL_MCP_CONFIG (global)"
+  echo "  Server URL:  $DEFAULT_SERVER_URL"
+  echo "  TLS certs:   $certs_dir/"
+  echo "  CA cert:     $config_dir/ca.pem (trusted)"
+  echo "  Auth token:  .env (HIVEMEM_AUTH_TOKEN)"
+  echo "  Config:      $config_dir/config"
   echo ""
   echo "  Next steps:"
   echo "    cd $project_root && docker compose up -d"
-  echo "    hivemem onboard /path/to/your/project"
+  echo "    hivemem init    # in your project directory"
   echo ""
 }
 
-# =========================================================================
-# install_skills — Install/update skills from repo (shared by init + update)
-# =========================================================================
-cmd_install_skills() {
+# ---------------------------------------------------------------------------
+# resolve_source_dir — Find repo source for skills and hooks
+# ---------------------------------------------------------------------------
+resolve_source_dir() {
+  if [[ -d "$REPO_ROOT/skills" && -d "$REPO_ROOT/hooks" ]]; then
+    echo "$REPO_ROOT"
+    return
+  fi
+
   need git
 
-  local repo="${HIVEMEM_REPO:-$GITHUB_URL.git}"
-  local branch="${HIVEMEM_BRANCH:-main}"
-  local skills_path="${HIVEMEM_SKILLS_PATH:-skills}"
+  local tmpdir clone_url
+  tmpdir="$(mktemp -d)"
+  clone_url="$GITHUB_URL.git"
 
-  info "Installing hivemem skills"
+  git clone --depth 1 --branch main --filter=blob:none --sparse \
+    "$clone_url" "$tmpdir" 2>/dev/null
+  (cd "$tmpdir" && git sparse-checkout set skills hooks 2>/dev/null)
+
+  echo "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
+# install_skills — Install/update skill files from repo
+# ---------------------------------------------------------------------------
+install_skills() {
+  local src_dir="$1/skills"
+
+  if [[ ! -d "$src_dir" ]]; then
+    warn "No skills source directory found at $src_dir"
+    return 1
+  fi
+
   mkdir -p "$SKILLS_DST"
 
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  trap "rm -rf '$tmpdir'" EXIT
-
-  git clone --depth 1 --branch "$branch" --filter=blob:none --sparse \
-    "$repo" "$tmpdir" 2>/dev/null
-  (cd "$tmpdir" && git sparse-checkout set "$skills_path" 2>/dev/null)
-
   local installed=0
-  for skill_dir in "$tmpdir/$skills_path"/hm-*/; do
+  for skill_dir in "$src_dir"/hm-*/; do
     [[ -d "$skill_dir" ]] || continue
     local skill_name
     skill_name="$(basename "$skill_dir")"
@@ -374,9 +393,6 @@ cmd_install_skills() {
     fi
   done
 
-  rm -rf "$tmpdir"
-  trap - EXIT
-
   # Clean up old commands format
   local cleaned=0
   for old_cmd in "$OLD_COMMANDS_DST"/hm-*.md; do
@@ -394,64 +410,336 @@ cmd_install_skills() {
   [[ $cleaned -gt 0 ]] && echo "  Cleaned up $cleaned old command(s)." || true
 }
 
+# ---------------------------------------------------------------------------
+# install_hooks — Copy hook scripts to .hivemem/hooks/
+# ---------------------------------------------------------------------------
+install_hooks() {
+  local src_dir="$1/hooks"
+  local dst_dir="$2"
+
+  if [[ ! -d "$src_dir" ]]; then
+    warn "No hooks source directory found at $src_dir"
+    return 1
+  fi
+
+  mkdir -p "$dst_dir/hooks"
+
+  local installed=0
+  for hook_file in "$src_dir"/*.sh; do
+    [[ -f "$hook_file" ]] || continue
+    local name
+    name="$(basename "$hook_file")"
+    local dst_file="$dst_dir/hooks/$name"
+
+    if [[ -f "$dst_file" ]] && cmp -s "$hook_file" "$dst_file"; then
+      skip "hooks/$name"
+    else
+      cp "$hook_file" "$dst_file"
+      chmod +x "$dst_file"
+      ok "hooks/$name -> $dst_dir/hooks/$name"
+      installed=$((installed + 1))
+    fi
+  done
+
+  if [[ $installed -eq 0 ]]; then
+    echo "  All hooks up to date."
+  else
+    echo "  Installed/updated $installed hook(s)."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# write_config — Create/update .hivemem/config
+# ---------------------------------------------------------------------------
+write_config() {
+  local hivemem_dir="$1"
+  local server_url="$2"
+  local token="${3:-}"
+  local config_file="$hivemem_dir/config"
+
+  mkdir -p "$hivemem_dir"
+
+  local new_content
+  new_content="$(printf 'server_url=%s\n' "$server_url")"
+  [[ -n "$token" ]] && new_content="${new_content}$(printf 'auth_token=%s\n' "$token")"
+
+  if [[ -f "$config_file" ]] && [[ "$(cat "$config_file")" == "$new_content" ]]; then
+    skip "config (unchanged)"
+  else
+    printf '%s' "$new_content" > "$config_file"
+    ok "config -> $config_file (server: $server_url)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# configure_settings_hooks — Add hivemem hooks to Claude settings JSON
+# Merges with existing hooks, does not overwrite.
+# ---------------------------------------------------------------------------
+configure_settings_hooks() {
+  local settings_file="$1"
+  local hivemem_dir="$2"
+
+  need python3
+
+  mkdir -p "$(dirname "$settings_file")"
+
+  python3 - "$settings_file" "$hivemem_dir" <<'PYEOF'
+import json, sys, os
+
+settings_file = sys.argv[1]
+hivemem_dir = sys.argv[2]
+
+# Define the hivemem hooks
+hivemem_hooks = {
+    "SessionStart": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hivemem_dir}/hooks/pre-init.sh",
+                    "timeout": 15
+                }
+            ]
+        }
+    ],
+    "PreCompact": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hivemem_dir}/hooks/pre-init.sh",
+                    "timeout": 15
+                }
+            ]
+        }
+    ]
+}
+
+# Load existing settings
+try:
+    with open(settings_file, "r") as f:
+        settings = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    settings = {}
+
+settings.setdefault("hooks", {})
+
+changed = False
+
+# Collect all hivemem hook commands we're installing
+all_hm_commands = set()
+for groups in hivemem_hooks.values():
+    for g in groups:
+        for h in g.get("hooks", []):
+            all_hm_commands.add(h["command"])
+
+# Clean up stale hivemem hooks and legacy "hivemem prime" hooks from ALL events
+for event in list(settings["hooks"].keys()):
+    existing = settings["hooks"][event]
+    filtered = []
+    for eg in existing:
+        eg_commands = {h.get("command", "") for h in eg.get("hooks", [])}
+        is_stale_hm = any("/.hivemem/hooks/" in c for c in eg_commands) and not (eg_commands & all_hm_commands)
+        is_legacy = any(c == "hivemem prime" for c in eg_commands)
+        if not is_stale_hm and not is_legacy:
+            filtered.append(eg)
+    if filtered != existing:
+        settings["hooks"][event] = filtered
+        changed = True
+    if not settings["hooks"][event]:
+        del settings["hooks"][event]
+        changed = True
+
+for event, groups in hivemem_hooks.items():
+    existing = settings["hooks"].get(event, [])
+
+    # Remove any existing hivemem hook groups (to allow updating)
+    filtered = []
+    for eg in existing:
+        eg_commands = {h.get("command", "") for h in eg.get("hooks", [])}
+        is_hm = any("/.hivemem/hooks/" in c for c in eg_commands)
+        is_legacy = any(c == "hivemem prime" for c in eg_commands)
+        if not is_hm and not is_legacy:
+            filtered.append(eg)
+
+    new_list = filtered + groups
+
+    if new_list != existing:
+        settings["hooks"][event] = new_list
+        changed = True
+
+if changed:
+    with open(settings_file, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    print("UPDATED")
+else:
+    print("UNCHANGED")
+PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# migrate_legacy_config — Migrate from .mcp.json to .hivemem/config
+# Cleans up old .mcp.json hivemem entries and warns about CLAUDE.md blocks.
+# ---------------------------------------------------------------------------
+migrate_legacy_config() {
+  local hivemem_dir="$1"
+  local migrated=false
+
+  for mcp_file in ".mcp.json" "$HOME/.mcp.json"; do
+    [[ -f "$mcp_file" ]] || continue
+
+    local legacy_url legacy_token
+    legacy_url="$(_read_legacy_mcp "$mcp_file" "url" || true)"
+    legacy_token="$(_read_legacy_mcp "$mcp_file" "token" || true)"
+
+    [[ -n "$legacy_url" ]] || continue
+
+    echo ""
+    info "Legacy migration"
+
+    # Write to new config if not already configured
+    if [[ ! -f "$hivemem_dir/config" ]]; then
+      write_config "$hivemem_dir" "$legacy_url" "$legacy_token"
+      ok "Migrated config from $mcp_file -> $hivemem_dir/config"
+      migrated=true
+    else
+      skip "Config already exists at $hivemem_dir/config"
+    fi
+
+    # Remove hivemem entry from .mcp.json
+    python3 - "$mcp_file" <<'PYEOF' 2>/dev/null || true
+import json, sys, os
+mcp_file = sys.argv[1]
+with open(mcp_file) as f:
+    cfg = json.load(f)
+if "hivemem" not in cfg.get("mcpServers", {}):
+    sys.exit(0)
+del cfg["mcpServers"]["hivemem"]
+if not cfg["mcpServers"]:
+    del cfg["mcpServers"]
+if cfg:
+    with open(mcp_file, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    print(f"  Cleaned hivemem entry from {mcp_file}")
+else:
+    os.remove(mcp_file)
+    print(f"  Removed empty {mcp_file}")
+PYEOF
+
+    break  # Only migrate from first found
+  done
+
+  # Warn about legacy CLAUDE.md blocks
+  local check_dirs=(".")
+  [[ -n "${2:-}" ]] && check_dirs+=("$2")
+  for d in "${check_dirs[@]}"; do
+    if [[ -f "$d/CLAUDE.md" ]] && grep -q '<!-- hivemem:start -->' "$d/CLAUDE.md" 2>/dev/null; then
+      echo ""
+      warn "Legacy hivemem block found in $d/CLAUDE.md"
+      echo "    Context is now injected via pre-init hook. You can safely remove the"
+      echo "    <!-- hivemem:start --> ... <!-- hivemem:end --> block."
+    fi
+  done
+
+  # Warn about legacy NODE_EXTRA_CA_CERTS in settings.json
+  if [[ -f "$HOME/.claude/settings.json" ]]; then
+    local has_node_ca
+    has_node_ca="$(python3 -c "
+import json
+with open('$HOME/.claude/settings.json') as f:
+    s = json.load(f)
+if 'NODE_EXTRA_CA_CERTS' in s.get('env', {}):
+    print('yes')
+" 2>/dev/null || true)"
+    if [[ "$has_node_ca" == "yes" ]]; then
+      echo ""
+      warn "Legacy NODE_EXTRA_CA_CERTS found in ~/.claude/settings.json"
+      echo "    This was needed for MCP client TLS. It's no longer required"
+      echo "    since hivemem now uses CLI instead of MCP integration."
+    fi
+  fi
+}
+
 # =========================================================================
-# init — Install/update skills and configure MCP
+# init — Install skills, hooks, configure settings
+# Default: global (~/.hivemem, ~/.claude/settings.json)
+# --local: project-specific (.hivemem/ in project root)
 # =========================================================================
-# Default: per-project .mcp.json pointing to local instance
-# --global: ~/.mcp.json (for external/hosted instance)
 cmd_init() {
-  local use_global=false
-  local target_dir="."
+  local use_global=true
+  local server_url="${HIVEMEM_URL:-$DEFAULT_SERVER_URL}"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --global) use_global=true; shift ;;
-      --project) target_dir="$2"; shift 2 ;;
+      --local)  use_global=false; shift ;;
+      --server) server_url="$2"; shift 2 ;;
       *) die "init: unknown option $1" ;;
     esac
   done
 
-  cmd_install_skills
+  # Resolve source files (repo checkout or sparse clone)
+  local source_dir
+  source_dir="$(resolve_source_dir)"
+  local cleanup_source=false
+  if [[ "$source_dir" != "$REPO_ROOT" ]]; then
+    cleanup_source=true
+  fi
 
-  # --- MCP config ---
-  echo ""
-  info "MCP config"
+  # Determine target paths
+  local hivemem_dir settings_file
 
-  local target_mcp target_url
   if $use_global; then
-    target_mcp="$GLOBAL_MCP_CONFIG"
-    target_url="$MCP_URL"
+    hivemem_dir="$HOME/.hivemem"
+    settings_file="$HOME/.claude/settings.json"
   else
-    target_mcp="$target_dir/.mcp.json"
-    target_url="$LOCAL_MCP_URL"
+    local project_root
+    project_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    hivemem_dir="$project_root/.hivemem"
+    settings_file="$project_root/.claude/settings.json"
   fi
 
-  # If already configured and no explicit env vars, preserve existing config
-  if [[ -f "$target_mcp" ]] && grep -q '"hivemem"' "$target_mcp" 2>/dev/null \
-     && [[ -z "${HIVEMEM_URL:-}" ]] && [[ -z "${HIVEMEM_AUTH_TOKEN:-}" ]]; then
-    skip "MCP already configured in $target_mcp"
+  # Resolve to absolute path
+  local hivemem_dir_abs
+  mkdir -p "$hivemem_dir"
+  hivemem_dir_abs="$(cd "$hivemem_dir" && pwd)"
+
+  # --- 1. Skills ---
+  info "Skills"
+  install_skills "$source_dir"
+
+  # --- 2. Hook scripts ---
+  echo ""
+  info "Hook scripts"
+  install_hooks "$source_dir" "$hivemem_dir_abs"
+
+  # --- 3. Config ---
+  echo ""
+  info "Config"
+  local token
+  token="${HIVEMEM_AUTH_TOKEN:-$(_read_config "$HOME/.hivemem/config" "auth_token" 2>/dev/null || true)}"
+  write_config "$hivemem_dir_abs" "$server_url" "$token"
+
+  # --- 4. Claude settings hooks ---
+  echo ""
+  info "Claude settings hooks"
+  local hook_result
+  hook_result="$(configure_settings_hooks "$settings_file" "$hivemem_dir_abs")"
+  if [[ "$hook_result" == "UPDATED" ]]; then
+    ok "Hooks configured in $settings_file"
   else
-    local token
-    token="$(resolve_token)"
-    if [[ -n "$token" ]]; then
-      configure_mcp "$target_url" "$token" "$target_mcp"
-    else
-      # No token — still write config for local (no auth needed in dev)
-      if $use_global; then
-        warn "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup'."
-        warn "Skipping global MCP config (needs auth for external instance)."
-      else
-        configure_mcp "$target_url" "" "$target_mcp"
-        warn "No auth token. Local dev mode (no auth). Set HIVEMEM_AUTH_TOKEN for production."
-      fi
-    fi
+    skip "Hooks already configured in $settings_file"
   fi
 
-  # --- TLS cert trust ---
+  # --- 5. TLS cert trust ---
   local server_host
-  server_host="$(echo "$target_url" | sed -E 's|https?://([^/]+).*|\1|')"
-  # Add default port if not specified
+  server_host="$(echo "$server_url" | sed -E 's|https?://([^/]+).*|\1|')"
   if [[ "$server_host" != *:* ]]; then
-    if [[ "$target_url" == https://* ]]; then
+    if [[ "$server_url" == https://* ]]; then
       server_host="$server_host:443"
     else
       server_host="$server_host:80"
@@ -461,303 +749,233 @@ cmd_init() {
   echo ""
   trust_server_cert "$server_host" || true
 
-  # --- Lifecycle hooks ---
-  echo ""
-  info "Lifecycle hooks"
-  configure_hooks "$target_dir"
+  # --- 6. Legacy migration ---
+  migrate_legacy_config "$hivemem_dir_abs"
 
+  # Clean up temp source dir
+  if $cleanup_source; then
+    rm -rf "$source_dir"
+  fi
+
+  echo ""
+  info "Hivemem initialized"
+  echo ""
+  echo "  Server:    $server_url"
+  echo "  Skills:    $SKILLS_DST/hm-*/"
+  echo "  Hooks:     $hivemem_dir_abs/hooks/"
+  echo "  Config:    $hivemem_dir_abs/config"
+  echo "  Settings:  $settings_file"
+  echo ""
   if $use_global; then
-    echo ""
-    echo "  Global config:  $GLOBAL_MCP_CONFIG -> $target_url"
-    echo "  Per-project configs take precedence over global."
+    echo "  Global install (default). Use --local for project-specific config."
   else
-    echo ""
-    echo "  Project config: $target_mcp -> $target_url"
-    echo "  Use --global to configure ~/.mcp.json for a hosted instance."
+    echo "  Project-local install. Global config takes effect everywhere else."
   fi
+  echo ""
 }
 
 # =========================================================================
-# update_claude_md — Create/update hivemem block in CLAUDE.md
-#   $1 = target directory (default: .)
-#   $2 = project name (default: basename of $1)
-#   --update-only: skip creation, only update existing blocks
+# API wrapper commands — thin CLI interface over the hivemem server
+# These replace direct MCP tool access. Skills call these via bash.
 # =========================================================================
-update_claude_md() {
-  local target_root="${1:-.}"
-  local proj_name="${2:-$(basename "$target_root")}"
-  local update_only=false
-  [[ "${3:-}" == "--update-only" ]] && update_only=true
 
-  info "CLAUDE.md integration"
-  local claude_md="$target_root/CLAUDE.md"
+# Internal: make a JSON-RPC call to the hivemem server
+# Usage: _api_call <tool_name> <arguments_json>
+# Outputs the parsed result text (or error message)
+_api_call() {
+  local tool_name="$1"
+  local args_json="$2"
 
-  local hivemem_block
-  hivemem_block="$(cat <<BLOCKEOF
-<!-- hivemem:start -->
-## Project Knowledge (Hivemem)
-<!-- hivemem-onboard-v:2 -->
+  resolve_server
+  local mcp_url="${SERVER_URL}/mcp"
 
-This project uses [Hivemem]($GITHUB_URL) for persistent knowledge management via MCP.
+  local payload
+  payload="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool_name\",\"arguments\":$args_json}}"
 
-**At the start of every session**, run:
-\`\`\`
-/hm-prime $proj_name
-\`\`\`
+  local auth_header=""
+  [[ -n "$AUTH_TOKEN" ]] && auth_header="Authorization: Bearer $AUTH_TOKEN"
 
-This loads project-specific conventions, patterns, decisions, and other learnings into your context.
+  local response
+  response="$(echo "$payload" | curl -sk -X POST "$mcp_url" \
+    -H "Content-Type: application/json" \
+    ${auth_header:+-H "$auth_header"} \
+    -d @- 2>/dev/null || true)"
 
-**Before completing your task**, review your work for insights worth preserving — conventions discovered,
-patterns applied, failures encountered, or decisions made — and record them:
-\`\`\`
-/hm-record $proj_name <convention|pattern|failure|decision|reference|guide> "description"
-\`\`\`
+  if [[ -z "$response" ]]; then
+    die "Could not reach hivemem server at $SERVER_URL"
+  fi
 
-Run \`/hm-status\` to check store health and record counts.
-Run \`/hm-search\` to find existing knowledge.
-<!-- hivemem:end -->
-BLOCKEOF
-)"
-
-  if [[ -f "$claude_md" ]]; then
-    if grep -q '<!-- hivemem:start -->' "$claude_md"; then
-      need python3
-      echo "$hivemem_block" | HIVEMEM_CLAUDE_MD="$claude_md" python3 -c "
-import re, sys, os
-
-block = sys.stdin.read().strip()
-claude_md = os.environ['HIVEMEM_CLAUDE_MD']
-
-with open(claude_md, 'r') as f:
-    content = f.read()
-
-new_content = re.sub(
-    r'<!-- hivemem:start -->.*?<!-- hivemem:end -->',
-    block,
-    content,
-    flags=re.DOTALL
-)
-
-if new_content == content:
-    sys.exit(2)
-
-with open(claude_md, 'w') as f:
-    f.write(new_content)
+  # Extract result text or error
+  echo "$response" | python3 -c "
+import json, sys
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+    if 'error' in data:
+        print(json.dumps({'error': data['error'].get('message', str(data['error']))}, indent=2))
+        sys.exit(1)
+    text = data['result']['content'][0]['text']
+    # Try to parse as JSON for pretty output
+    try:
+        parsed = json.loads(text)
+        print(json.dumps(parsed, indent=2))
+    except:
+        print(text)
+except (json.JSONDecodeError, KeyError, IndexError) as e:
+    print(f'Error parsing response: {e}', file=sys.stderr)
+    print(raw)
+    sys.exit(1)
 "
-      rc=$?
-      if [[ $rc -eq 2 ]]; then
-        skip "CLAUDE.md hivemem block (unchanged)"
-      else
-        ok "Updated hivemem block in CLAUDE.md"
-      fi
-    elif ! $update_only; then
-      printf '\n%s\n' "$hivemem_block" >> "$claude_md"
-      ok "Appended hivemem block to CLAUDE.md"
-    else
-      skip "CLAUDE.md (no hivemem block found)"
-    fi
-  elif ! $update_only; then
-    printf '%s\n' "$hivemem_block" > "$claude_md"
-    ok "Created CLAUDE.md with hivemem block"
-  else
-    skip "CLAUDE.md (not found)"
-  fi
 }
 
 # =========================================================================
-# onboard — Onboard a project (CLAUDE.md + skills)
+# search — Search knowledge records
+# Usage: hivemem search [query] [--project P] [--type T] [--tag TAG] [--limit N]
 # =========================================================================
-cmd_onboard() {
-  local target_root="${1:-.}"
-  local no_install=false
-  local migrate=false
-  local use_global=false
+cmd_search() {
+  local query="" project="" knowledge_type="" limit="25"
+  local -a tags=()
 
-  shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --no-install) no_install=true; shift ;;
-      --migrate-mulch) migrate=true; shift ;;
-      --global) use_global=true; shift ;;
-      *) die "onboard: unknown option $1" ;;
+      --project|-p) project="$2"; shift 2 ;;
+      --type|-t)    knowledge_type="$2"; shift 2 ;;
+      --tag)        tags+=("$2"); shift 2 ;;
+      --limit|-l)   limit="$2"; shift 2 ;;
+      -*)           die "search: unknown option $1" ;;
+      *)            query="${query:+$query }$1"; shift ;;
     esac
   done
-
-  target_root="$(cd "$target_root" 2>/dev/null && pwd)" || die "Directory not found: $target_root"
-  local proj_name
-  proj_name="$(basename "$target_root")"
-
-  info "Onboarding project: $proj_name ($target_root)"
-
-  # --- Skills + MCP ---
-  if ! $no_install; then
-    if $use_global; then
-      cmd_init --global
-    else
-      cmd_init --project "$target_root"
-    fi
-    echo ""
-  fi
-
-  # --- CLAUDE.md ---
-  update_claude_md "$target_root" "$proj_name"
-
-  # --- Mulch migration ---
-  if $migrate; then
-    echo ""
-    cmd_migrate "$target_root"
-  fi
-
-  echo ""
-  info "Project onboarded: $proj_name"
-  echo ""
-  echo "  CLAUDE.md:  $claude_md"
-  echo "  Skills:     $SKILLS_DST/hm-*/"
-  echo ""
-  echo "  Claude Code will now prompt to prime and record knowledge"
-  echo "  for this project at session start/end."
-  echo ""
-}
-
-# =========================================================================
-# migrate — Import mulch records into hivemem
-# =========================================================================
-cmd_migrate() {
-  local mulch_root="${1:-.}"
-  local dry_run=false
-
-  shift || true
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run) dry_run=true; shift ;;
-      *) die "migrate: unknown option $1" ;;
-    esac
-  done
-
-  mulch_root="$(cd "$mulch_root" 2>/dev/null && pwd)" || die "Directory not found: $mulch_root"
 
   need python3
   need curl
 
-  local mulch_dir="$mulch_root/.mulch/expertise"
-  if [[ ! -d "$mulch_dir" ]]; then
-    die "No .mulch/expertise/ found at $mulch_root"
-  fi
-
-  local token
-  token="$(resolve_token)"
-  if [[ -z "$token" ]] && ! $dry_run; then
-    die "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup' first."
-  fi
-
-  info "Mulch migration: $mulch_root"
-
-  local total_migrated=0
-  local total_domains=0
-
-  for jsonl_file in "$mulch_dir"/*.jsonl; do
-    [[ -f "$jsonl_file" ]] || continue
-    local domain
-    domain="$(basename "$jsonl_file" .jsonl)"
-    local record_count
-    record_count="$(wc -l < "$jsonl_file" | tr -d ' ')"
-    total_domains=$((total_domains + 1))
-
-    info "Domain: $domain ($record_count records)"
-
-    while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-
-      # Use stdin to avoid shell quoting issues with JSON
-      local result
-      result="$(echo "$line" | python3 -c "
-import json, os, sys
-
-record = json.loads(sys.stdin.readline())
-domain = '$domain'
-
-knowledge_type = record.get('type', 'convention')
-content = record.get('content', record.get('description', ''))
-title = record.get('name', '')
-if not title:
-    title = content.split(chr(10))[0][:100] if content else 'Untitled'
-
-classification = record.get('classification', 'tactical')
-
-# Build tags (without classification/files — those have proper fields now)
-tags = list(record.get('tags', []))
-
-# Evidence
-evidence = record.get('evidence', {})
-
-# Relations
-relates_to = record.get('relates_to', [])
-supersedes = record.get('supersedes', [])
-
-# Type-specific metadata
-metadata = {}
-files = record.get('files', [])
-if isinstance(files, list) and files:
-    metadata['files'] = files
-resolution = record.get('resolution', '')
-if resolution:
-    metadata['resolution'] = resolution
-rationale = record.get('rationale', '')
-if rationale:
-    metadata['rationale'] = rationale
-rec_date = record.get('date', '')
-if rec_date:
-    metadata['date'] = rec_date
-
-payload = {
-    'jsonrpc': '2.0',
-    'id': 1,
-    'method': 'tools/call',
-    'params': {
-        'name': 'hivemem_write_tool',
-        'arguments': {
-            'project': domain,
-            'knowledge_type': knowledge_type,
-            'title': title,
-            'content': content,
-            'classification': classification,
-            'tags': tags,
-            'evidence': evidence,
-            'relates_to': relates_to,
-            'supersedes': supersedes,
-            'metadata': metadata
-        }
-    }
-}
-
-print(f'{knowledge_type}: {title[:60]}')
-print(json.dumps(payload))
+  local args_json
+  args_json="$(HIVEMEM_Q="$query" HIVEMEM_P="$project" HIVEMEM_T="$knowledge_type" HIVEMEM_L="$limit" \
+    HIVEMEM_TAGS="$(printf '%s\n' "${tags[@]}" 2>/dev/null || true)" python3 -c "
+import json, os
+args = {'limit': int(os.environ['HIVEMEM_L'])}
+q = os.environ['HIVEMEM_Q']
+p = os.environ['HIVEMEM_P']
+t = os.environ['HIVEMEM_T']
+tags_raw = os.environ.get('HIVEMEM_TAGS', '').strip()
+if q: args['query'] = q
+if p: args['project'] = p
+if t: args['knowledge_type'] = t
+if tags_raw:
+    tags = [t for t in tags_raw.split('\n') if t]
+    if tags: args['tags'] = tags
+print(json.dumps(args))
 ")"
 
-      local summary payload
-      summary="$(echo "$result" | head -1)"
-      payload="$(echo "$result" | tail -n +2)"
+  _api_call "hivemem_search_tool" "$args_json"
+}
 
-      if $dry_run; then
-        echo "  [dry-run] $summary"
-      else
-        echo "$payload" | curl -sk -X POST "$MCP_URL" \
-          -H "Content-Type: application/json" \
-          -H "Authorization: Bearer $token" \
-          -d @- > /dev/null 2>&1
-        ok "$summary"
-      fi
+# =========================================================================
+# read — Read a full record by shortlink
+# Usage: hivemem read <shortlink>
+# =========================================================================
+cmd_read() {
+  local shortlink="${1:-}"
+  [[ -n "$shortlink" ]] || die "Usage: hivemem read <shortlink>"
 
-      total_migrated=$((total_migrated + 1))
-    done < "$jsonl_file"
+  need python3
+  need curl
+
+  local args_json
+  args_json="$(HIVEMEM_SL="$shortlink" python3 -c "import json,os; print(json.dumps({'shortlink': os.environ['HIVEMEM_SL']}))")"
+  _api_call "hivemem_read_tool" "$args_json"
+}
+
+# =========================================================================
+# write — Create a knowledge record
+# Usage: hivemem write --project P --type T --title "..." --content "..." [options]
+# =========================================================================
+cmd_write() {
+  local project="" knowledge_type="" title="" content="" summary=""
+  local classification="tactical"
+  local -a tags=()
+  local evidence_json="{}" metadata_json="{}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)        project="$2"; shift 2 ;;
+      --type|-t)           knowledge_type="$2"; shift 2 ;;
+      --title)             title="$2"; shift 2 ;;
+      --content)           content="$2"; shift 2 ;;
+      --summary)           summary="$2"; shift 2 ;;
+      --classification)    classification="$2"; shift 2 ;;
+      --tag)               tags+=("$2"); shift 2 ;;
+      --evidence-commit)   evidence_json="{\"commit\":\"$2\"}"; shift 2 ;;
+      --evidence)          evidence_json="$2"; shift 2 ;;
+      --metadata)          metadata_json="$2"; shift 2 ;;
+      -*)                  die "write: unknown option $1" ;;
+      *)                   # Positional: type then rest as title
+                           if [[ -z "$knowledge_type" ]]; then
+                             knowledge_type="$1"
+                           elif [[ -z "$title" ]]; then
+                             title="$1"
+                           else
+                             title="$title $1"
+                           fi
+                           shift ;;
+    esac
   done
 
-  echo ""
-  if $dry_run; then
-    info "Dry run: would migrate $total_migrated records from $total_domains domains"
-  else
-    ok "Migrated $total_migrated records from $total_domains domains"
-  fi
+  [[ -n "$knowledge_type" ]] || die "write: --type is required"
+  [[ -n "$title" ]]          || die "write: --title is required"
+
+  # Default project to cwd basename
+  project="${project:-$(basename "$(pwd)")}"
+  # Default content to title if not provided
+  content="${content:-$title}"
+
+  need python3
+  need curl
+
+  local args_json
+  args_json="$(HIVEMEM_P="$project" HIVEMEM_T="$knowledge_type" HIVEMEM_TITLE="$title" \
+    HIVEMEM_CONTENT="$content" HIVEMEM_SUMMARY="$summary" HIVEMEM_CLASS="$classification" \
+    HIVEMEM_TAGS="$(printf '%s\n' "${tags[@]}" 2>/dev/null || true)" \
+    HIVEMEM_EVIDENCE="$evidence_json" HIVEMEM_META="$metadata_json" python3 -c "
+import json, os
+args = {
+    'project': os.environ['HIVEMEM_P'],
+    'knowledge_type': os.environ['HIVEMEM_T'],
+    'title': os.environ['HIVEMEM_TITLE'],
+    'content': os.environ['HIVEMEM_CONTENT'],
+    'classification': os.environ['HIVEMEM_CLASS'],
+}
+summary = os.environ.get('HIVEMEM_SUMMARY', '')
+if summary: args['summary'] = summary
+tags_raw = os.environ.get('HIVEMEM_TAGS', '').strip()
+if tags_raw:
+    tags = [t for t in tags_raw.split('\n') if t]
+    if tags: args['tags'] = tags
+evidence = json.loads(os.environ.get('HIVEMEM_EVIDENCE', '{}'))
+if evidence: args['evidence'] = evidence
+metadata = json.loads(os.environ.get('HIVEMEM_META', '{}'))
+if metadata: args['metadata'] = metadata
+print(json.dumps(args))
+")"
+
+  _api_call "hivemem_write_tool" "$args_json"
+}
+
+# =========================================================================
+# delete — Delete a record by shortlink
+# Usage: hivemem delete <shortlink>
+# =========================================================================
+cmd_delete() {
+  local shortlink="${1:-}"
+  [[ -n "$shortlink" ]] || die "Usage: hivemem delete <shortlink>"
+
+  need python3
+  need curl
+
+  local args_json
+  args_json="$(HIVEMEM_SL="$shortlink" python3 -c "import json,os; print(json.dumps({'shortlink': os.environ['HIVEMEM_SL']}))")"
+  _api_call "hivemem_delete_tool" "$args_json"
 }
 
 # =========================================================================
@@ -791,19 +1009,10 @@ cmd_prime() {
   need python3
   need curl
 
-  # Resolve MCP URL and token from .mcp.json (project or global)
-  local mcp_url="" token=""
-  for cfg in ".mcp.json" "$GLOBAL_MCP_CONFIG"; do
-    if [[ -f "$cfg" ]] && grep -q '"hivemem"' "$cfg" 2>/dev/null; then
-      mcp_url="$(python3 -c "import json; print(json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
-      token="$(python3 -c "import json; h=json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('headers',{}); print(h.get('Authorization','').removeprefix('Bearer '))" 2>/dev/null || true)"
-      [[ -n "$mcp_url" ]] && break
-    fi
-  done
-
-  # Fall back to env/defaults
-  mcp_url="${mcp_url:-$MCP_URL}"
-  token="${token:-$(resolve_token)}"
+  # Resolve server URL and auth token
+  resolve_server
+  local mcp_url="${SERVER_URL}/mcp"
+  local token="$AUTH_TOKEN"
 
   # Context filtering: build search query from git changes or explicit files
   local search_query=""
@@ -863,7 +1072,7 @@ print(json.dumps({
     -d @- 2>/dev/null || true)"
 
   if [[ -z "$response" ]]; then
-    echo "# Hivemem: could not reach server at $mcp_url"
+    echo "# Hivemem: could not reach server at $SERVER_URL"
     echo ""
     echo "Records will be available once the server is running."
     exit 0
@@ -922,7 +1131,6 @@ def apply_budget(records, budget_tokens):
         if used + cost <= budget_tokens:
             kept.append(r)
             used += cost
-        # else: skip (dropped)
     return kept, len(records) - len(kept)
 
 def budget_summary(dropped, fmt):
@@ -1047,7 +1255,6 @@ def group_by_domain(records):
         tags = r.get("tags") or []
         domain = tags[0] if tags else "General"
         domains.setdefault(domain, []).append(r)
-    # Sort domains alphabetically, but General last
     return dict(sorted(domains.items(), key=lambda x: (x[0] == "General", x[0])))
 
 # --- JSON format ---
@@ -1142,7 +1349,6 @@ else:
     print(render_rules())
     for domain, domain_recs in group_by_domain(records).items():
         print(f"## {domain}")
-        # Sub-group by type within domain
         domain_by_type = {}
         for r in domain_recs:
             domain_by_type.setdefault(r["knowledge_type"], []).append(r)
@@ -1184,103 +1390,140 @@ PYEOF
 }
 
 # =========================================================================
-# configure_hooks — Set up Claude Code SessionStart/PreCompact hooks
+# migrate — Import mulch records into hivemem
 # =========================================================================
-# Writes to project-level .claude/settings.json (matches mulch pattern).
-# Usage: configure_hooks [--check|--remove] [dir]
-configure_hooks() {
-  local action="install"
-  local project_dir="."
+cmd_migrate() {
+  local mulch_root="."
+  local dry_run=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --check) action="check"; shift ;;
-      --remove) action="remove"; shift ;;
-      *) project_dir="$1"; shift ;;
+      --dry-run) dry_run=true; shift ;;
+      -*) die "migrate: unknown option $1" ;;
+      *) mulch_root="$1"; shift ;;
     esac
   done
 
-  local claude_settings="$project_dir/.claude/settings.json"
-  local hook_command="hivemem prime"
-  local hook_group='{"matcher":"","hooks":[{"type":"command","command":"hivemem prime"}]}'
+  mulch_root="$(cd "$mulch_root" 2>/dev/null && pwd)" || die "Directory not found: $mulch_root"
 
-  need jq
+  need python3
+  need curl
 
-  # Load existing settings or start empty
-  local settings='{}'
-  if [[ -f "$claude_settings" ]]; then
-    settings="$(cat "$claude_settings")"
+  local mulch_dir="$mulch_root/.mulch/expertise"
+  if [[ ! -d "$mulch_dir" ]]; then
+    die "No .mulch/expertise/ found at $mulch_root"
   fi
 
-  # Ensure .hooks exists
-  settings="$(echo "$settings" | jq '.hooks //= {}')"
+  # Resolve server
+  resolve_server
+  local mcp_url="${SERVER_URL}/mcp"
+  local token="$AUTH_TOKEN"
 
-  # Helper: check if an event already has the hivemem hook
-  _has_hook() {
-    echo "$settings" | jq -e \
-      --arg evt "$1" --arg cmd "$hook_command" \
-      '.hooks[$evt] // [] | any(.[]; .hooks[]? | .command == $cmd)' \
-      >/dev/null 2>&1
-  }
+  if [[ -z "$token" ]] && ! $dry_run; then
+    die "No auth token found. Set HIVEMEM_AUTH_TOKEN or run 'hivemem setup' first."
+  fi
 
-  case "$action" in
-    check)
-      local missing=()
-      for event in SessionStart PreCompact; do
-        _has_hook "$event" || missing+=("$event")
-      done
-      if [[ ${#missing[@]} -eq 0 ]]; then
-        ok "Hooks installed and correct."
+  info "Mulch migration: $mulch_root"
+
+  local total_migrated=0
+  local total_domains=0
+
+  for jsonl_file in "$mulch_dir"/*.jsonl; do
+    [[ -f "$jsonl_file" ]] || continue
+    local domain
+    domain="$(basename "$jsonl_file" .jsonl)"
+    local record_count
+    record_count="$(wc -l < "$jsonl_file" | tr -d ' ')"
+    total_domains=$((total_domains + 1))
+
+    info "Domain: $domain ($record_count records)"
+
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+
+      local result
+      result="$(echo "$line" | python3 -c "
+import json, os, sys
+
+record = json.loads(sys.stdin.readline())
+domain = '$domain'
+
+knowledge_type = record.get('type', 'convention')
+content = record.get('content', record.get('description', ''))
+title = record.get('name', '')
+if not title:
+    title = content.split(chr(10))[0][:100] if content else 'Untitled'
+
+classification = record.get('classification', 'tactical')
+
+tags = list(record.get('tags', []))
+evidence = record.get('evidence', {})
+relates_to = record.get('relates_to', [])
+supersedes = record.get('supersedes', [])
+
+metadata = {}
+files = record.get('files', [])
+if isinstance(files, list) and files:
+    metadata['files'] = files
+resolution = record.get('resolution', '')
+if resolution:
+    metadata['resolution'] = resolution
+rationale = record.get('rationale', '')
+if rationale:
+    metadata['rationale'] = rationale
+rec_date = record.get('date', '')
+if rec_date:
+    metadata['date'] = rec_date
+
+payload = {
+    'jsonrpc': '2.0',
+    'id': 1,
+    'method': 'tools/call',
+    'params': {
+        'name': 'hivemem_write_tool',
+        'arguments': {
+            'project': domain,
+            'knowledge_type': knowledge_type,
+            'title': title,
+            'content': content,
+            'classification': classification,
+            'tags': tags,
+            'evidence': evidence,
+            'relates_to': relates_to,
+            'supersedes': supersedes,
+            'metadata': metadata
+        }
+    }
+}
+
+print(f'{knowledge_type}: {title[:60]}')
+print(json.dumps(payload))
+")"
+
+      local summary payload
+      summary="$(echo "$result" | head -1)"
+      payload="$(echo "$result" | tail -n +2)"
+
+      if $dry_run; then
+        echo "  [dry-run] $summary"
       else
-        local IFS=','
-        warn "Missing hooks: ${missing[*]}"
-        return 1
+        echo "$payload" | curl -sk -X POST "$mcp_url" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $token" \
+          -d @- > /dev/null 2>&1
+        ok "$summary"
       fi
-      ;;
 
-    remove)
-      local removed=false
-      for event in SessionStart PreCompact; do
-        if _has_hook "$event"; then
-          settings="$(echo "$settings" | jq \
-            --arg evt "$event" --arg cmd "$hook_command" \
-            '.hooks[$evt] = [.hooks[$evt][]? | select(.hooks | all(.command != $cmd))]')"
-          removed=true
-        fi
-      done
-      # Clean up empty event arrays and empty hooks object
-      settings="$(echo "$settings" | jq '
-        .hooks |= with_entries(select(.value | length > 0))
-        | if .hooks == {} then del(.hooks) else . end
-      ')"
-      mkdir -p "$(dirname "$claude_settings")"
-      echo "$settings" | jq . > "$claude_settings"
-      if $removed; then
-        ok "Removed hivemem hooks from $claude_settings"
-      else
-        skip "No hivemem hooks found in $claude_settings"
-      fi
-      ;;
+      total_migrated=$((total_migrated + 1))
+    done < "$jsonl_file"
+  done
 
-    install)
-      local already=true
-      for event in SessionStart PreCompact; do
-        if ! _has_hook "$event"; then
-          settings="$(echo "$settings" | jq \
-            --arg evt "$event" --argjson grp "$hook_group" \
-            '.hooks[$evt] = (.hooks[$evt] // []) + [$grp]')"
-          already=false
-        fi
-      done
-      if $already; then
-        skip "Hooks already installed."
-      else
-        mkdir -p "$(dirname "$claude_settings")"
-        echo "$settings" | jq . > "$claude_settings"
-        ok "Hooks configured: SessionStart + PreCompact -> hivemem prime"
-      fi
-      ;;
-  esac
+  echo ""
+  if $dry_run; then
+    info "Dry run: would migrate $total_migrated records from $total_domains domains"
+  else
+    ok "Migrated $total_migrated records from $total_domains domains"
+  fi
 }
 
 # =========================================================================
@@ -1298,30 +1541,22 @@ cmd_validate() {
   local project
   project="$(basename "$(pwd)")"
 
+  # Resolve server
+  resolve_server
+  local health_url="${SERVER_URL}/health"
+  local mcp_url="${SERVER_URL}/mcp"
+  local token="$AUTH_TOKEN"
+
   # Check server reachability
-  local health_url="${MCP_URL%/mcp}/health"
   local health_status
   health_status="$(curl -sk -o /dev/null -w '%{http_code}' "$health_url" 2>/dev/null || echo "000")"
 
   if [[ "$health_status" != "200" ]]; then
-    echo "FAIL: hivemem server unreachable at $MCP_URL"
+    echo "FAIL: hivemem server unreachable at $SERVER_URL"
     return 1
   fi
 
   $quiet || echo "hivemem validate: $project"
-
-  # Fetch records
-  local token mcp_url
-  mcp_url="$MCP_URL"
-  token="$(resolve_token 2>/dev/null || true)"
-
-  for cfg in ".mcp.json" "$GLOBAL_MCP_CONFIG"; do
-    if [[ -f "$cfg" ]] && grep -q '"hivemem"' "$cfg" 2>/dev/null; then
-      mcp_url="$(python3 -c "import json; print(json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
-      token="$(python3 -c "import json; h=json.load(open('$cfg')).get('mcpServers',{}).get('hivemem',{}).get('headers',{}); print(h.get('Authorization','').removeprefix('Bearer '))" 2>/dev/null || true)"
-      [[ -n "$mcp_url" ]] && break
-    fi
-  done
 
   local payload auth_header response
   payload=$(HIVEMEM_P="$project" python3 -c "
@@ -1333,7 +1568,7 @@ print(json.dumps({
 }))
 ")
 
-  local auth_header=""
+  auth_header=""
   [[ -n "$token" ]] && auth_header="Authorization: Bearer $token"
 
   response="$(echo "$payload" | curl -sk -X POST "$mcp_url" \
@@ -1394,95 +1629,13 @@ else:
 }
 
 # =========================================================================
-# configure_git_hooks — Install pre-commit hook for hivemem validate
-# =========================================================================
-configure_git_hooks() {
-  local action="install"
-  local project_dir="."
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --check) action="check"; shift ;;
-      --remove) action="remove"; shift ;;
-      *) project_dir="$1"; shift ;;
-    esac
-  done
-
-  local hook_marker_start="# hivemem:start"
-  local hook_marker_end="# hivemem:end"
-  local hook_path="$project_dir/.git/hooks/pre-commit"
-
-  local hook_section
-  hook_section="$hook_marker_start
-# Run hivemem validate before committing
-if command -v hivemem >/dev/null 2>&1; then
-  hivemem validate --quiet
-  if [ \$? -ne 0 ]; then
-    echo \"hivemem validate failed. Commit aborted.\"
-    exit 1
-  fi
-fi
-$hook_marker_end"
-
-  case "$action" in
-    check)
-      if [[ ! -f "$hook_path" ]]; then
-        warn "Git pre-commit hook not found."
-        return 1
-      fi
-      if grep -q "$hook_marker_start" "$hook_path"; then
-        ok "Git pre-commit hook is installed."
-      else
-        warn "Git pre-commit hook exists but has no hivemem section."
-        return 1
-      fi
-      ;;
-    remove)
-      if [[ ! -f "$hook_path" ]] || ! grep -q "$hook_marker_start" "$hook_path"; then
-        skip "No hivemem section in pre-commit hook."
-        return 0
-      fi
-      # Remove the hivemem section
-      local content cleaned
-      content="$(cat "$hook_path")"
-      cleaned="$(echo "$content" | sed "/$hook_marker_start/,/$hook_marker_end/d" | sed '/^$/N;/^\n$/d')"
-      if [[ -z "$cleaned" || "$cleaned" == "#!/bin/sh" ]]; then
-        rm -f "$hook_path"
-        ok "Removed hivemem pre-commit hook (file deleted)."
-      else
-        echo "$cleaned" > "$hook_path"
-        ok "Removed hivemem section from pre-commit hook."
-      fi
-      ;;
-    install)
-      if [[ ! -d "$project_dir/.git" ]]; then
-        warn "Not a git repository — .git directory not found."
-        return 1
-      fi
-      if [[ -f "$hook_path" ]] && grep -q "$hook_marker_start" "$hook_path"; then
-        skip "Git pre-commit hook already installed."
-        return 0
-      fi
-      mkdir -p "$(dirname "$hook_path")"
-      if [[ -f "$hook_path" ]]; then
-        # Append to existing hook
-        printf '\n%s\n' "$hook_section" >> "$hook_path"
-      else
-        printf '#!/bin/sh\n\n%s\n' "$hook_section" > "$hook_path"
-      fi
-      chmod +x "$hook_path"
-      ok "Installed hivemem pre-commit git hook."
-      ;;
-  esac
-}
-
-# =========================================================================
 # status — Check server health
 # =========================================================================
 cmd_status() {
-  local health_url="${MCP_URL%/mcp}/health"
+  resolve_server
+  local health_url="${SERVER_URL}/health"
 
-  printf "  Server:  %s\n" "$MCP_URL"
+  printf "  Server:  %s\n" "$SERVER_URL"
 
   local http_code
   http_code="$(curl -sk -o /dev/null -w '%{http_code}' "$health_url" 2>/dev/null || echo "000")"
@@ -1502,22 +1655,36 @@ cmd_status() {
   done
   printf "  Skills:  %d installed in %s\n" "$skill_count" "$SKILLS_DST"
 
-  # Check MCP config
-  local mcp_found=false
-  if [[ -f ".mcp.json" ]] && grep -q '"hivemem"' ".mcp.json" 2>/dev/null; then
+  # Check config
+  local config_found=false
+  if [[ -f ".hivemem/config" ]]; then
     local project_url
-    project_url="$(python3 -c "import json; print(json.load(open('.mcp.json')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
-    ok "MCP configured in project (.mcp.json) -> $project_url"
-    mcp_found=true
+    project_url="$(_read_config ".hivemem/config" "server_url" 2>/dev/null || true)"
+    ok "Project config (.hivemem/config) -> ${project_url:-$DEFAULT_SERVER_URL}"
+    config_found=true
   fi
-  if [[ -f "$GLOBAL_MCP_CONFIG" ]] && grep -q '"hivemem"' "$GLOBAL_MCP_CONFIG" 2>/dev/null; then
+  if [[ -f "$HOME/.hivemem/config" ]]; then
     local global_url
-    global_url="$(python3 -c "import json; print(json.load(open('$GLOBAL_MCP_CONFIG')).get('mcpServers',{}).get('hivemem',{}).get('url',''))" 2>/dev/null || true)"
-    ok "MCP configured globally ($GLOBAL_MCP_CONFIG) -> $global_url"
-    mcp_found=true
+    global_url="$(_read_config "$HOME/.hivemem/config" "server_url" 2>/dev/null || true)"
+    ok "Global config (~/.hivemem/config) -> ${global_url:-$DEFAULT_SERVER_URL}"
+    config_found=true
   fi
-  if ! $mcp_found; then
-    warn "MCP not configured (run 'hivemem init')"
+  # Check legacy .mcp.json
+  if ! $config_found; then
+    local legacy_found=false
+    for mcp_file in ".mcp.json" "$HOME/.mcp.json"; do
+      if [[ -f "$mcp_file" ]]; then
+        local legacy_url
+        legacy_url="$(_read_legacy_mcp "$mcp_file" "url" 2>/dev/null || true)"
+        if [[ -n "$legacy_url" ]]; then
+          warn "Legacy config ($mcp_file) -> $legacy_url (run 'hivemem init' to migrate)"
+          legacy_found=true
+        fi
+      fi
+    done
+    if ! $legacy_found; then
+      warn "No config found (run 'hivemem init')"
+    fi
   fi
 }
 
@@ -1542,7 +1709,7 @@ cmd_version() {
 }
 
 # =========================================================================
-# update — Self-update from GitHub releases (uses gh for private repos)
+# update — Self-update from GitHub releases
 # =========================================================================
 cmd_update() {
   need gh
@@ -1573,22 +1740,25 @@ cmd_update() {
   rm -rf "$tmpdir"
   echo "Updated to $latest"
 
-  # Update skills from the new version's repo
+  # Resolve source and re-install skills
   echo ""
-  cmd_install_skills
-
-  # Migrate: remove old global hooks (only hivemem's, not others)
-  if [[ -f "$HOME/.claude/settings.json" ]]; then
-    echo ""
-    info "Migrating hooks from global to project-level"
-    configure_hooks --remove "$HOME"
+  local source_dir
+  source_dir="$(resolve_source_dir)"
+  install_skills "$source_dir"
+  if [[ "$source_dir" != "$REPO_ROOT" ]]; then
+    rm -rf "$source_dir"
   fi
 
-  # Update hooks in current project
-  echo ""
-  configure_hooks "$(pwd)"
-  echo ""
-  update_claude_md "$(pwd)" "$(basename "$(pwd)")" --update-only
+  # Update hooks in current project if configured
+  if [[ -d ".hivemem/hooks" ]]; then
+    echo ""
+    info "Updating project hooks"
+    source_dir="$(resolve_source_dir)"
+    install_hooks "$source_dir" "$(pwd)/.hivemem"
+    if [[ "$source_dir" != "$REPO_ROOT" ]]; then
+      rm -rf "$source_dir"
+    fi
+  fi
 }
 
 # =========================================================================
@@ -1601,14 +1771,26 @@ hivemem — Portable CLI for hivemem knowledge store
 Usage: hivemem <command> [args]
 
 Commands:
-  setup [--hostname NAME]         Bootstrap local server (TLS, auth, MCP config)
-  onboard [PATH] [OPTIONS]        Onboard a project
-    --no-install                    Skip skill installation
-    --migrate-mulch                 Also migrate mulch records
-    --global                        Write MCP config to ~/.mcp.json instead of project
-  init [OPTIONS]                  Install skills, configure MCP, set up hooks
-    --global                        Write to ~/.mcp.json (for hosted instance)
-    --project PATH                  Target project dir (default: cwd)
+  setup [--hostname NAME]         Bootstrap local server (TLS, auth, config)
+  init [OPTIONS]                  Install skills, hooks, configure settings (global by default)
+    --local                         Install to project instead of global
+    --server URL                    Server URL (default: https://localhost:3055)
+  search [QUERY] [OPTIONS]        Search knowledge records
+    --project/-p NAME               Filter by project
+    --type/-t TYPE                  Filter by knowledge type
+    --tag TAG                       Filter by tag (repeatable)
+    --limit/-l N                    Max results (default: 25)
+  read <SHORTLINK>                Read a full record by shortlink
+  write [OPTIONS]                 Create a knowledge record
+    --project/-p NAME               Project name (default: cwd basename)
+    --type/-t TYPE                  Knowledge type (required)
+    --title TEXT                    Record title (required)
+    --content TEXT                  Record content (default: title)
+    --summary TEXT                  Brief summary for search results
+    --classification CLASS          foundational|tactical|observational (default: tactical)
+    --tag TAG                       Tag (repeatable)
+    --evidence-commit SHA           Git commit SHA as evidence
+  delete <SHORTLINK>              Delete a record by shortlink
   prime [PROJECT] [OPTIONS]       Output project knowledge (auto-runs via hooks)
     --compact                       One-line per record (default)
     --full                          Grouped by type with headers
@@ -1617,6 +1799,8 @@ Commands:
     --files <paths...>              Filter to records relevant to specific files
     --domain <domains...>           Include only these domains (by first tag)
     --exclude-domain <domains...>   Exclude these domains
+    --budget <tokens>               Token budget (default: 4000, 0 = no limit)
+    --no-limit                      Alias for --budget 0
   migrate [PATH] [--dry-run]      Migrate mulch records into hivemem
   validate [--quiet]              Check record health (pre-commit hook)
   status                          Check server health and config
@@ -1624,34 +1808,33 @@ Commands:
   update                          Self-update from GitHub releases
   help                            Show this help
 
-MCP Config Precedence:
-  Per-project .mcp.json takes precedence over global ~/.mcp.json.
-  Default: per-project .mcp.json -> localhost (local-first)
-  --global: ~/.mcp.json -> hosted instance (set HIVEMEM_URL)
+Config Precedence:
+  Project .hivemem/config takes precedence over global ~/.hivemem/config.
+  Default server: https://localhost:3055
 
 Environment:
-  HIVEMEM_URL              MCP endpoint (default: https://localhost:3055/mcp)
-  HIVEMEM_AUTH_TOKEN       Auth token (overrides .env)
+  HIVEMEM_URL              Server URL (overrides config files)
+  HIVEMEM_AUTH_TOKEN       Auth token (overrides config files)
   HIVEMEM_PROJECT_ROOT     Server project root (auto-detected)
-  HIVEMEM_REPO             Git repo for skills (default: restot/hivemem)
-  HIVEMEM_BRANCH           Git branch for skills (default: main)
-  HIVEMEM_SKILLS_PATH      Path within repo (default: skills)
 
 Install:
   gh release download --repo restot/hivemem --pattern hivemem --dir ~/.local/bin \
     && chmod +x ~/.local/bin/hivemem
 
-Onboard a new project:
-  cd ~/my-project
-  hivemem onboard .
-  # or: hivemem onboard . --migrate-mulch
+Migration:
+  Users upgrading from v0.3.x: run 'hivemem init' to migrate from
+  .mcp.json to .hivemem/config. Legacy .mcp.json configs are read as
+  fallback and migrated automatically during init.
 
-Typical setup:
-  # Local dev (default — per-project .mcp.json -> localhost:3055)
-  hivemem setup && docker compose up -d && hivemem onboard ~/my-project
+Quick start:
+  # Server setup (one-time)
+  cd ~/path/to/hivemem && hivemem setup && docker compose up -d
 
-  # Hosted (global ~/.mcp.json -> external server)
-  HIVEMEM_URL=https://server:3100/mcp hivemem init --global
+  # Install globally (default — works for all projects)
+  hivemem init
+
+  # Or install for a specific project only
+  hivemem init --local
 EOF
 }
 
@@ -1663,8 +1846,11 @@ shift || true
 
 case "$cmd" in
   setup)    cmd_setup "$@" ;;
-  onboard)  cmd_onboard "$@" ;;
   init)     cmd_init "$@" ;;
+  search)   cmd_search "$@" ;;
+  read)     cmd_read "$@" ;;
+  write)    cmd_write "$@" ;;
+  delete)   cmd_delete "$@" ;;
   prime)    cmd_prime "$@" ;;
   migrate)  cmd_migrate "$@" ;;
   validate) cmd_validate "$@" ;;
@@ -1672,5 +1858,7 @@ case "$cmd" in
   version)  cmd_version "$@" ;;
   update)   cmd_update "$@" ;;
   help|-h|--help) cmd_help ;;
+  # Legacy alias
+  onboard)  cmd_init "$@" ;;
   *) die "Unknown command: $cmd (run 'hivemem help')" ;;
 esac
