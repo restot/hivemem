@@ -76,7 +76,7 @@ cmd_search() {
 
   local args_json
   args_json="$(HIVEMEM_Q="$query" HIVEMEM_P="$project" HIVEMEM_T="$knowledge_type" HIVEMEM_L="$limit" \
-    HIVEMEM_TAGS="$(printf '%s\n' "${tags[@]}" 2>/dev/null || true)" python3 -c "
+    HIVEMEM_TAGS="$(printf '%s\n' ${tags[@]+"${tags[@]}"} 2>/dev/null || true)" python3 -c "
 import json, os
 args = {'limit': int(os.environ['HIVEMEM_L'])}
 q = os.environ['HIVEMEM_Q']
@@ -160,7 +160,7 @@ cmd_write() {
   local args_json
   args_json="$(HIVEMEM_P="$project" HIVEMEM_T="$knowledge_type" HIVEMEM_TITLE="$title" \
     HIVEMEM_CONTENT="$content" HIVEMEM_SUMMARY="$summary" HIVEMEM_CLASS="$classification" \
-    HIVEMEM_TAGS="$(printf '%s\n' "${tags[@]}" 2>/dev/null || true)" \
+    HIVEMEM_TAGS="$(printf '%s\n' ${tags[@]+${tags[@]+"${tags[@]}"}} 2>/dev/null || true)" \
     HIVEMEM_EVIDENCE="$evidence_json" HIVEMEM_META="$metadata_json" python3 -c "
 import json, os
 args = {

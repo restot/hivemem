@@ -1,5 +1,5 @@
 class KnowledgeRecord < ApplicationRecord
-  KNOWLEDGE_TYPES = %w[convention pattern decision failure reference guide].freeze
+  KNOWLEDGE_TYPES = %w[convention pattern decision failure reference guide conversation].freeze
   CLASSIFICATIONS = %w[foundational tactical observational].freeze
   SHORTLINK_LENGTH = 7
   SHORTLINK_ALPHABET = ("a".."z").to_a + ("A".."Z").to_a + ("0".."9").to_a

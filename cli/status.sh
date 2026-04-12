@@ -110,23 +110,41 @@ cmd_update() {
   rm -rf "$tmpdir"
   echo "Updated to $latest"
 
-  # Resolve source and re-install skills
+  # Resolve source and re-install skills + hooks
   echo ""
   local source_dir
   source_dir="$(resolve_source_dir)"
+  local cleanup_source=false
+  [[ "$source_dir" != "$REPO_ROOT" ]] && cleanup_source=true
+
   install_skills "$source_dir"
-  if [[ "$source_dir" != "$REPO_ROOT" ]]; then
-    rm -rf "$source_dir"
+
+  # Update global hooks
+  if [[ -d "$HOME/.hivemem/hooks" ]]; then
+    echo ""
+    info "Updating global hooks"
+    install_hooks "$source_dir" "$HOME/.hivemem"
   fi
 
-  # Update hooks in current project if configured
+  # Update project hooks if configured
   if [[ -d ".hivemem/hooks" ]]; then
     echo ""
     info "Updating project hooks"
-    source_dir="$(resolve_source_dir)"
     install_hooks "$source_dir" "$(pwd)/.hivemem"
-    if [[ "$source_dir" != "$REPO_ROOT" ]]; then
-      rm -rf "$source_dir"
+  fi
+
+  # Update Claude settings hooks
+  if [[ -f "$HOME/.claude/settings.json" ]]; then
+    echo ""
+    info "Claude settings hooks"
+    local hook_result
+    hook_result="$(configure_settings_hooks "$HOME/.claude/settings.json" "$HOME/.hivemem")"
+    if [[ "$hook_result" == "UPDATED" ]]; then
+      ok "Hooks configured in ~/.claude/settings.json"
+    else
+      skip "Hooks already configured"
     fi
   fi
+
+  $cleanup_source && rm -rf "$source_dir" || true
 }

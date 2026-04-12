@@ -175,6 +175,18 @@ hivemem_hooks = {
                 }
             ]
         }
+    ],
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hivemem_dir}/hooks/stop.sh",
+                    "timeout": 5
+                }
+            ]
+        }
     ]
 }
 
