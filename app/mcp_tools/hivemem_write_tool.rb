@@ -5,7 +5,7 @@ class HivememWriteTool < MCP::Tool
     properties: {
       title: { type: "string", description: "Short descriptive title" },
       content: { type: "string", description: "Full record content" },
-      knowledge_type: { type: "string", description: "One of: convention, pattern, decision, failure, reference, guide" },
+      knowledge_type: { type: "string", description: "One of: convention, pattern, decision, failure, reference, guide, conversation" },
       project: { type: "string", description: "Project identifier (e.g. telegram-bot, hivemem)" },
       summary: { type: "string", description: "1-3 sentence summary for search results" },
       tags: { type: "array", items: { type: "string" }, description: "Free-form tags" },

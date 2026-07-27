@@ -17,6 +17,8 @@ Commands:
     --type/-t TYPE                  Filter by knowledge type
     --tag TAG                       Filter by tag (repeatable)
     --limit/-l N                    Max results (default: 25)
+    --vector                        Semantic vector search (requires embeddings)
+    --query                         Hybrid BM25+vector+rerank (requires embeddings)
   read <SHORTLINK>                Read a full record by shortlink
   write [OPTIONS]                 Create a knowledge record
     --project/-p NAME               Project name (default: cwd basename)

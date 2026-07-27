@@ -55,9 +55,10 @@ except (json.JSONDecodeError, KeyError, IndexError) as e:
 # =========================================================================
 # search — Search knowledge records
 # Usage: hivemem search [query] [--project P] [--type T] [--tag TAG] [--limit N]
+#                       [--vector|--query]
 # =========================================================================
 cmd_search() {
-  local query="" project="" knowledge_type="" limit="25"
+  local query="" project="" knowledge_type="" limit="25" mode=""
   local -a tags=()
 
   while [[ $# -gt 0 ]]; do
@@ -66,6 +67,8 @@ cmd_search() {
       --type|-t)    knowledge_type="$2"; shift 2 ;;
       --tag)        tags+=("$2"); shift 2 ;;
       --limit|-l)   limit="$2"; shift 2 ;;
+      --vector)     mode="vsearch"; shift ;;
+      --query)      mode="query"; shift ;;
       -*)           die "search: unknown option $1" ;;
       *)            query="${query:+$query }$1"; shift ;;
     esac
@@ -76,16 +79,19 @@ cmd_search() {
 
   local args_json
   args_json="$(HIVEMEM_Q="$query" HIVEMEM_P="$project" HIVEMEM_T="$knowledge_type" HIVEMEM_L="$limit" \
+    HIVEMEM_MODE="$mode" \
     HIVEMEM_TAGS="$(printf '%s\n' ${tags[@]+"${tags[@]}"} 2>/dev/null || true)" python3 -c "
 import json, os
 args = {'limit': int(os.environ['HIVEMEM_L'])}
 q = os.environ['HIVEMEM_Q']
 p = os.environ['HIVEMEM_P']
 t = os.environ['HIVEMEM_T']
+m = os.environ.get('HIVEMEM_MODE', '')
 tags_raw = os.environ.get('HIVEMEM_TAGS', '').strip()
 if q: args['query'] = q
 if p: args['project'] = p
 if t: args['knowledge_type'] = t
+if m: args['mode'] = m
 if tags_raw:
     tags = [t for t in tags_raw.split('\n') if t]
     if tags: args['tags'] = tags

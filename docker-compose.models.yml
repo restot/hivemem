@@ -1,0 +1,32 @@
+# Optional: local inference via Docker Model Runner (Docker Desktop 4.40+ only).
+#
+# Enables semantic search (`--vector`) and hybrid search (`--query`). Without it
+# hivemem runs BM25-only, which is the default and requires nothing extra.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.models.yml up -d
+#
+# Not compatible with OrbStack, Colima, or plain Docker Engine — those lack the
+# `docker model` plugin and compose will refuse to start. To use a different
+# inference host instead (Ollama, llama.cpp, vLLM), skip this file and set
+# EMBEDDINGS_URL / RERANKER_URL / EXPANDER_URL in a docker-compose.override.yml.
+models:
+  embeddings:
+    model: ai/embeddinggemma
+    context_size: 512
+    runtime_flags:
+      - "--embeddings"
+
+  reranker:
+    model: ai/qwen3-reranker:0.6B-Q4_K_M
+    context_size: 2048
+
+  expander:
+    model: ai/qwen3:0.6B-Q4_K_M
+    context_size: 2048
+
+services:
+  web:
+    models:
+      - embeddings
+      - reranker
+      - expander

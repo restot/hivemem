@@ -4,6 +4,8 @@ class KnowledgeRecord < ApplicationRecord
   SHORTLINK_LENGTH = 7
   SHORTLINK_ALPHABET = ("a".."z").to_a + ("A".."Z").to_a + ("0".."9").to_a
 
+  has_many :record_embeddings, dependent: :destroy
+
   validates :title, presence: true
   validates :content, presence: true
   validates :project, presence: true
@@ -13,6 +15,9 @@ class KnowledgeRecord < ApplicationRecord
 
   before_validation :generate_shortlink, on: :create
   before_validation :set_default_classification, on: :create
+  after_save :generate_embeddings, if: -> {
+    saved_change_to_title? || saved_change_to_summary? || saved_change_to_content?
+  }
 
   # --- Search ---
 
@@ -71,6 +76,16 @@ class KnowledgeRecord < ApplicationRecord
 
   # --- Search result formatting ---
 
+  # --- Vector search ---
+
+  scope :with_embeddings, -> { joins(:record_embeddings).where(record_embeddings: { model_id: EmbeddingClient.current_model_id }) }
+  scope :needs_embedding, -> {
+    left_joins(:record_embeddings)
+      .where(record_embeddings: { id: nil })
+      .or(left_joins(:record_embeddings).where.not(record_embeddings: { model_id: EmbeddingClient.current_model_id }))
+      .distinct
+  }
+
   def as_search_result
     {
       shortlink: shortlink,
@@ -123,5 +138,24 @@ class KnowledgeRecord < ApplicationRecord
 
   def random_base62(length)
     Array.new(length) { SHORTLINK_ALPHABET.sample }.join
+  end
+
+  def generate_embeddings
+    return unless EmbeddingClient.available?
+
+    chunks = EmbeddingChunker.chunk(self)
+    record_embeddings.destroy_all
+
+    chunks.each_with_index do |chunk_text, i|
+      vector = EmbeddingClient.embed(chunk_text)
+      record_embeddings.create!(
+        embedding: vector,
+        chunk_index: i,
+        chunk_text: chunk_text,
+        model_id: EmbeddingClient.current_model_id
+      )
+    end
+  rescue StandardError => e
+    Rails.logger.error("Embedding generation failed for #{shortlink}: #{e.message}")
   end
 end

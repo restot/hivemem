@@ -40,4 +40,9 @@ Rails.application.configure do
 
   # Raise error when a before_action's only/except options reference missing actions.
   config.action_controller.raise_on_missing_callback_actions = true
+
+  # OrbStack gives every container a <service>.<project>.orb.local domain.
+  # A regexp is required here: the ".orb.local" shorthand only matches one
+  # label deep, so it misses the two-level <service>.<project> form.
+  config.hosts << /\A[a-z0-9.\-]+\.orb\.local(:\d+)?\z/i
 end
